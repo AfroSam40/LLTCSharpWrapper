@@ -1,0 +1,175 @@
+﻿<Window x:Class="LLT.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:oxy="http://oxyplot.org/wpf"
+        xmlns:local="clr-namespace:LLT"
+        xmlns:helix="http://helix-toolkit.org/wpf"
+        mc:Ignorable="d"
+        Title="MainWindow"
+        Height="450"
+        Width="1000">
+
+    <!-- Two tabs: Profile + PointCloud -->
+    <TabControl Margin="10">
+        <!-- PROFILE TAB -->
+        <TabItem Header="Profile">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <!-- Connect / Transmit -->
+                    <RowDefinition Height="Auto" />
+                    <!-- Plot -->
+                    <RowDefinition Height="*" />
+                    <!--feedback-->
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- CONNECT / TRANSMIT PANEL -->
+                <Border Grid.Row="0"
+                        BorderBrush="#DDDDDD"
+                        BorderThickness="1"
+                        CornerRadius="4"
+                        Padding="8"
+                        Margin="0,0,0,8">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Device selection -->
+                        <StackPanel Grid.Column="0"
+                                    Orientation="Horizontal"
+                                    VerticalAlignment="Center">
+                            <TextBlock Text="Device:"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,4,0" />
+                            <ComboBox x:Name="DeviceCombo"
+                                      Width="260"
+                                      DisplayMemberPath="Display"
+                                      SelectedValuePath="Handle"
+                                      Margin="0,0,4,0" />
+                            <Button x:Name="FindButton"
+                                    Content="Find"
+                                    Width="70"
+                                    Margin="4,0,0,0"
+                                    Click="FindButton_Click" />
+
+                            <Button x:Name="ConnectButton"
+                                    Content="Connect"
+                                    Width="90"
+                                    Margin="5,0,4,0"
+                                    Click="ConnectButton_Click" />
+                        </StackPanel>
+
+                        <!-- Poll interval -->
+                        <StackPanel Grid.Column="2"
+                                    Orientation="Horizontal"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Center">
+                            <TextBlock Text="Poll interval (ms):"
+                                       VerticalAlignment="Center" />
+                            <TextBox x:Name="PollIntervalText"
+                                     Width="60"
+                                     Text="50"
+                                     VerticalContentAlignment="Center"
+                                     HorizontalContentAlignment="Right"
+                                     Margin="4,0,0,0" />
+                            <Button x:Name="StartButton"
+                                    Content="Start"
+                                    Width="80"
+                                    Margin="5,0,4,0"
+                                    Click="StartButton_Click" />
+                            <Button x:Name="StopButton"
+                                    Content="Stop"
+                                    Width="80"
+                                    IsEnabled="False"
+                                    Click="StopButton_Click" />
+                        </StackPanel>
+
+                        <!-- Start / Stop --><!--
+                        <StackPanel Grid.Column="3"
+                                    Orientation="Horizontal"
+                                    VerticalAlignment="Center">
+                            
+                        </StackPanel>
+
+                        --><!-- Simple status / error --><!--
+                        <StackPanel Grid.Column="4"
+                                    Orientation="Vertical"
+                                    VerticalAlignment="Center">
+                           
+                          
+                        </StackPanel>-->
+                    </Grid>
+                </Border>
+
+                <!-- PROFILE PLOT -->
+                <Border Grid.Row="1"
+                        BorderBrush="#DDDDDD"
+                        BorderThickness="1"
+                        CornerRadius="4"
+                        Padding="6">
+                    <oxy:PlotView x:Name="ProfilePlot" Background="LightGray" />
+                </Border>
+
+                <Border Grid.Row="1"
+                        BorderBrush="#DDDDDD"
+                        BorderThickness="1"
+                        CornerRadius="4"
+                        Padding="1"
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Top"
+                        Margin="5">
+                    <TextBlock x:Name="FrequencyText"
+                               Text="Profiles/s: -"
+                               Margin="0,0,0,2" />
+                </Border>
+
+                    <!--Feedback-->
+                <Border Grid.Row="2"
+                        BorderBrush="#DDDDDD"
+                        BorderThickness="1"
+                        CornerRadius="4"
+                        Padding="2"
+                        Margin="0,2,0,0">
+                    <StackPanel Orientation="Horizontal">
+                        <Label Content="Status:"
+                               VerticalAlignment="Center" />
+                        <TextBlock x:Name="StatusText"
+                                   VerticalAlignment="Center"
+                                   Foreground="DarkRed"
+                                   Text="Disconnected" />
+
+                        <TextBlock x:Name="LastErrorText"
+                                   Text="Last error: -"
+                                   Foreground="DarkRed"
+                                   TextTrimming="CharacterEllipsis" 
+                                   VerticalAlignment="Center"
+                                   Margin="20,0,0,0"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </TabItem>
+
+        <!-- POINT CLOUD TAB -->
+        <TabItem Header="PointCloud">
+            <Grid>
+                <!-- Full-window Helix 3D viewer -->
+                <helix:HelixViewport3D x:Name="PointCloudViewport"
+                                       ZoomExtentsWhenLoaded="True">
+                    <!-- Default lights-->
+                    <helix:DefaultLights />
+
+                    <!-- 3D point cloud rendered here.
+                         Bind or fill the Points collection from code-behind. -->
+                    <helix:PointsVisual3D x:Name="PointCloudPoints"
+                                          Color="DodgerBlue"
+                                          Size="1.5" />
+                </helix:HelixViewport3D>
+            </Grid>
+        </TabItem>
+    </TabControl>
+</Window>
