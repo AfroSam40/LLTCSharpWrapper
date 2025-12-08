@@ -112,7 +112,7 @@
                         BorderThickness="1"
                         CornerRadius="4"
                         Padding="6">
-                    <oxy:PlotView x:Name="ProfilePlot" Background="LightGray" />
+                    <oxy:PlotView x:Name="ProfilePlot" />
                 </Border>
 
                 <Border Grid.Row="1"
@@ -157,18 +157,74 @@
         <!-- POINT CLOUD TAB -->
         <TabItem Header="PointCloud">
             <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                
                 <!-- Full-window Helix 3D viewer -->
-                <helix:HelixViewport3D x:Name="PointCloudViewport"
-                                       ZoomExtentsWhenLoaded="True">
-                    <!-- Default lights-->
-                    <helix:DefaultLights />
+                <Border Grid.Row="0"
+                        BorderBrush="#DDDDDD"
+                        BorderThickness="1"
+                        CornerRadius="4"
+                        Padding="2"
+                        Margin="5">
+                    
+                    <helix:HelixViewport3D x:Name="Viewport"
+                                           ZoomExtentsWhenLoaded="True">
+                        <!-- Default lights-->
+                        <helix:DefaultLights />
 
-                    <!-- 3D point cloud rendered here.
-                         Bind or fill the Points collection from code-behind. -->
-                    <helix:PointsVisual3D x:Name="PointCloudPoints"
-                                          Color="DodgerBlue"
-                                          Size="1.5" />
-                </helix:HelixViewport3D>
+                        <!-- 3D mesh rendered here. -->
+                        <ModelVisual3D x:Name="MeshModel" />
+                        
+                        <!-- 3D point cloud rendered here.
+                        Bind or fill the Points collection from code-behind. -->
+                        <helix:PointsVisual3D x:Name="PointCloudPoints"
+                                              Color="DodgerBlue"
+                                              Size="1.5" 
+                                              />
+
+                        <!-- projected points onto a plane -->
+                        <helix:PointsVisual3D x:Name="ProjectedPoints"
+                                              Color="Red"
+                                              Size="1.5" />
+                    </helix:HelixViewport3D>
+                </Border>
+
+                <StackPanel Orientation="Horizontal"
+                            VerticalAlignment="Top"
+                            HorizontalAlignment="Left"
+                            Margin="5">
+                    <Label Content="Point Cloud Count: " />
+                    <Label Name="LblPointCloudCnt"
+                           Content="-" />
+                </StackPanel>
+                
+                <Border Grid.Row="1"
+                        BorderBrush="#DDDDDD"
+                        BorderThickness="1"
+                        CornerRadius="4"
+                        Padding="2"
+                        Margin="5">
+                    <StackPanel Orientation="Horizontal">
+                        <Button x:Name="BtnLoadSTL"
+                                Content="Load STL"
+                                Width="80"
+                                Margin="1"
+                                HorizontalAlignment="Left"
+                                Click="LoadStlButton_Click" />
+
+                        <Button x:Name="BtnPoject"
+                                Content="Project"
+                                Width="80"
+                                Margin="1"
+                                HorizontalAlignment="Left"
+                                Click="BtnPoject_Click" />
+                    </StackPanel>
+                  
+                </Border>
+
             </Grid>
         </TabItem>
     </TabControl>
