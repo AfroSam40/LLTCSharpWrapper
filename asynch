@@ -1,0 +1,242 @@
+unsafe private static void StaticProfileCallback(byte* data, uint size, uint userData)
+{
+    LLTSensor sensor = null;
+    lock (_cbLock)
+    {
+        _cbInstances.TryGetValue(userData, out sensor);
+    }
+
+    sensor?.OnProfileCallback(data, size);
+}
+
+unsafe private void OnProfileCallback(byte* data, uint size)
+{
+    if (size == 0)
+        return;
+
+    // If we aren't currently waiting, or buffer not prepared, ignore
+    var buffer = _asyncProfileBuffer;
+    if (buffer == null || _asyncNeededProfiles <= 0)
+        return;
+
+    // If we already got everything we need, ignore extra profiles
+    if (_asyncReceivedProfiles >= _asyncNeededProfiles)
+        return;
+
+    // First profile: remember its size
+    if (_asyncProfileDataSize == 0)
+    {
+        _asyncProfileDataSize = size;
+    }
+    else if (size != _asyncProfileDataSize)
+    {
+        // Inconsistent packet size – ignore or log; we bail out for safety
+        return;
+    }
+
+    int singleProfileSize = (int)size;
+    int current = _asyncReceivedProfiles;
+    int offset = current * singleProfileSize;
+
+    if (offset + singleProfileSize > buffer.Length)
+    {
+        // Overflow guard – something is off; ignore extra data
+        return;
+    }
+
+    // Copy from unmanaged memory -> managed buffer
+    Marshal.Copy(new IntPtr(data), buffer, offset, singleProfileSize);
+
+    // Atomically increment count
+    int newCount = Interlocked.Increment(ref _asyncReceivedProfiles);
+
+    if (newCount >= _asyncNeededProfiles)
+    {
+        _asyncProfileReceived = true;
+        _profileEvent.Set();
+    }
+}
+
+
+
+
+
+
+
+
+--------
+
+
+
+
+public async Task<List<Profile>> EncoderAsyncPoll(
+    int profileCount,
+    int timeoutMs = 5000,
+    bool gatedEncoder = false)
+{
+    if (!_connected)
+        throw new InvalidOperationException("Sensor not connected. Call Connect() first.");
+
+    if (profileCount <= 0)
+        throw new ArgumentOutOfRangeException(nameof(profileCount), "profileCount must be > 0.");
+
+    // Ensure we don't run two async collections at once
+    if (Interlocked.Exchange(ref _asyncInUse, 1) == 1)
+        throw new InvalidOperationException("An async acquisition is already running.");
+
+    uint resolution = (uint)_resolution;
+
+    try
+    {
+        // -----------------------------
+        // 1) Configure digital IO as encoder (IN2/IN3) – gated optional
+        // -----------------------------
+        uint digitalIoConfig =
+            CLLTI.MULTI_LEVEL_24V |           // 24V level
+            CLLTI.MULTI_RS422_TERM_ON |       // RS422 termination
+            CLLTI.MULTI_ENCODER_BIDIRECT |    // quadrature encoder
+            CLLTI.MULTI_INPUT_PULLUP |        // pull-up
+            (gatedEncoder
+                ? CLLTI.MULTI_DIGIN_GATED_ENCODER
+                : CLLTI.MULTI_DIGIN_ENC_TRIG);
+
+        int ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_DIGITAL_IO, digitalIoConfig);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("SetFeature(DIGITAL_IO encoder)", ret);
+            throw new Exception(ErrorMessage ?? "Failed to configure encoder digital IO.");
+        }
+
+        // -----------------------------
+        // 2) Configure trigger to use encoder on the digital input
+        // -----------------------------
+        uint triggerConfig =
+            CLLTI.TRIG_MODE_ENCODER |
+            CLLTI.TRIG_INPUT_DIGIN |
+            CLLTI.TRIG_POLARITY_HIGH |
+            CLLTI.TRIG_EXT_ACTIVE;
+
+        ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_TRIGGER, triggerConfig);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("SetFeature(TRIGGER encoder)", ret);
+            throw new Exception(ErrorMessage ?? "Failed to configure encoder trigger.");
+        }
+
+        // -----------------------------
+        // 3) Prepare async buffer/state
+        // -----------------------------
+        int singleProfileBytes = checked((int)(resolution * 64));
+
+        _asyncProfileBuffer   = new byte[singleProfileBytes * profileCount];
+        _asyncProfileDataSize = 0;
+        _asyncNeededProfiles  = profileCount;
+        _asyncReceivedProfiles = 0;
+        _asyncProfileReceived = false;
+        _profileEvent.Reset();
+
+        // Let parameters settle a bit
+        await Task.Delay(120);
+
+        // -----------------------------
+        // 4) Start continuous profile transfer
+        // -----------------------------
+        ret = CLLTI.TransferProfiles(device, TTransferProfileType.NORMAL_TRANSFER, 1);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("TransferProfiles(start encoder)", ret);
+            throw new Exception(ErrorMessage ?? "Failed to start encoder-triggered transfer.");
+        }
+
+        try
+        {
+            // Wait until we have the requested number of profiles or timeout
+            bool signaled = await Task.Run(() => _profileEvent.WaitOne(timeoutMs));
+
+            if (!signaled || _asyncReceivedProfiles < _asyncNeededProfiles)
+            {
+                SetError("EncoderAsyncPoll timeout", CLLTI.ERROR_PROFTRANS_NO_NEW_PROFILE);
+                throw new TimeoutException(
+                    $"Timed out waiting for {_asyncNeededProfiles} encoder profiles. Received: {_asyncReceivedProfiles}");
+            }
+
+            // Sanity-check that profile size is what we expect
+            if (_asyncProfileDataSize != resolution * 64)
+            {
+                SetError("EncoderAsyncPoll size mismatch", (int)_asyncProfileDataSize);
+                throw new Exception(
+                    $"Profile size mismatch: expected {resolution * 64}, got {_asyncProfileDataSize}");
+            }
+
+            // -----------------------------
+            // 5) Convert each profile slice to X/Z and wrap into Profile objects
+            // -----------------------------
+            var profiles = new List<Profile>(_asyncNeededProfiles);
+            var xValues  = new double[resolution];
+            var zValues  = new double[resolution];
+
+            var singleBuffer = new byte[singleProfileBytes];
+
+            for (int p = 0; p < _asyncNeededProfiles; p++)
+            {
+                // Copy this profile’s bytes into a single-profile buffer
+                Buffer.BlockCopy(
+                    _asyncProfileBuffer!,
+                    p * singleProfileBytes,
+                    singleBuffer,
+                    0,
+                    singleProfileBytes);
+
+                ret = CLLTI.ConvertProfile2Values(
+                    device,
+                    singleBuffer,
+                    resolution,
+                    TProfileConfig.PROFILE,
+                    _scannerType,
+                    0,   // reflection 0
+                    1,   // convert to mm
+                    null, null, null,
+                    xValues,
+                    zValues,
+                    null, null);
+
+                if (((ret & CLLTI.CONVERT_X) == 0) || ((ret & CLLTI.CONVERT_Z) == 0))
+                {
+                    SetError("ConvertProfile2Values(encoder)", ret);
+                    throw new Exception(ErrorMessage);
+                }
+
+                var profile = new Profile(new List<ScanPoint>((int)resolution));
+                for (int i = 0; i < resolution; i++)
+                {
+                    profile.Add(new ScanPoint
+                    {
+                        X = xValues[i],
+                        Z = zValues[i]
+                    });
+                }
+
+                profiles.Add(profile);
+            }
+
+            ErrorMessage = null;
+            return profiles;
+        }
+        finally
+        {
+            // Stop transfer regardless of success/failure
+            CLLTI.TransferProfiles(device, TTransferProfileType.NORMAL_TRANSFER, 0);
+
+            // Clear async state
+            _asyncProfileBuffer   = null;
+            _asyncProfileDataSize = 0;
+            _asyncNeededProfiles  = 0;
+            _asyncReceivedProfiles = 0;
+            _asyncProfileReceived = false;
+        }
+    }
+    finally
+    {
+        Interlocked.Exchange(ref _asyncInUse, 0);
+    }
+}
