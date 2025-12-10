@@ -1,0 +1,154 @@
+public List<Profile> AcquireProfilesEncoderTriggered(
+    int profileCount,
+    int timeoutPerProfileMs = 2000,
+    bool gatedEncoder = false)
+{
+    if (!_connected)
+        throw new InvalidOperationException("Sensor not connected. Call Connect() first.");
+
+    if (profileCount <= 0)
+        throw new ArgumentOutOfRangeException(nameof(profileCount), "Profile count must be > 0.");
+
+    int ret;
+    uint lostProfiles = 0;
+    uint resolution = (uint)_resolution;
+
+    // 1) Configure the multi-IO port for encoder on IN2 / IN3
+    //
+    // This makes the digital inputs behave as an encoder A/B pair.
+    // Adjust flags if your wiring/voltage is different.
+    uint digitalIoConfig =
+        CLLTI.MULTI_LEVEL_24V |           // 24 V input level
+        CLLTI.MULTI_RS422_TERM_ON |       // RS422 termination on
+        CLLTI.MULTI_ENCODER_BIDIRECT |    // quadrature encoder
+        CLLTI.MULTI_INPUT_PULLUP |        // pull-up
+        (gatedEncoder
+            ? CLLTI.MULTI_DIGIN_GATED_ENCODER  // encoder gated by digital input
+            : CLLTI.MULTI_DIGIN_ENC_TRIG);     // encoder trigger mode
+
+    ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_DIGITAL_IO, digitalIoConfig);
+    if (ret < CLLTI.GENERAL_FUNCTION_OK)
+    {
+        SetError("SetFeature(DIGITAL_IO)", ret);
+        throw new Exception(ErrorMessage ?? "Failed to configure digital IO for encoder.");
+    }
+
+    // 2) Configure trigger: encoder on digital inputs as external trigger
+    uint triggerConfig =
+        CLLTI.TRIG_MODE_ENCODER |
+        CLLTI.TRIG_INPUT_DIGIN |
+        CLLTI.TRIG_POLARITY_HIGH |
+        CLLTI.TRIG_EXT_ACTIVE;    // use external trigger, not internal
+
+    ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_TRIGGER, triggerConfig);
+    if (ret < CLLTI.GENERAL_FUNCTION_OK)
+    {
+        SetError("SetFeature(TRIGGER)", ret);
+        throw new Exception(ErrorMessage ?? "Failed to configure encoder trigger.");
+    }
+
+    // 3) Allocate buffers
+    var profiles = new List<Profile>(profileCount);
+
+    double[] xValues = new double[resolution];
+    double[] zValues = new double[resolution];
+    byte[] profileBuffer = new byte[resolution * 64];
+
+    // 4) Start continuous profile transfer (encoder decides when profiles appear)
+    ret = CLLTI.TransferProfiles(device, TTransferProfileType.NORMAL_TRANSFER, 1);
+    if (ret < CLLTI.GENERAL_FUNCTION_OK)
+    {
+        SetError("TransferProfiles(start, encoder)", ret);
+        throw new Exception(ErrorMessage ?? "Failed to start profile transfer.");
+    }
+
+    try
+    {
+        var overallWatch = System.Diagnostics.Stopwatch.StartNew();
+
+        for (int n = 0; n < profileCount; n++)
+        {
+            var perProfileWatch = System.Diagnostics.Stopwatch.StartNew();
+
+            while (true)
+            {
+                ret = CLLTI.GetActualProfile(
+                    device,
+                    profileBuffer,
+                    profileBuffer.Length,
+                    TProfileConfig.PROFILE,
+                    ref lostProfiles);
+
+                if (ret == CLLTI.ERROR_PROFTRANS_NO_NEW_PROFILE)
+                {
+                    // No profile yet – encoder hasn’t moved enough.
+                    // Back off a bit and check timeout.
+                    if (perProfileWatch.ElapsedMilliseconds > timeoutPerProfileMs)
+                    {
+                        SetError("GetActualProfile(timeout)", ret);
+                        throw new TimeoutException(
+                            $"Timeout waiting for encoder-triggered profile {n + 1}/{profileCount}.");
+                    }
+
+                    // Sleep roughly according to frame time, but small enough not to be too laggy
+                    System.Threading.Thread.Sleep((int)(_exposureTime + _idleTime) / 200 + 1);
+                    continue;
+                }
+
+                if (ret != profileBuffer.Length)
+                {
+                    SetError("GetActualProfile(size)", ret);
+                    throw new Exception(ErrorMessage ?? $"Unexpected profile size: {ret}.");
+                }
+
+                // Got one profile
+                break;
+            }
+
+            // 5) Convert this profile to X/Z arrays
+            ret = CLLTI.ConvertProfile2Values(
+                device,
+                profileBuffer,
+                resolution,
+                TProfileConfig.PROFILE,
+                _scannerType,
+                0,   // reflection index
+                1,   // convert to mm
+                null, null, null,
+                xValues,
+                zValues,
+                null, null);
+
+            if (((ret & CLLTI.CONVERT_X) == 0) || ((ret & CLLTI.CONVERT_Z) == 0))
+            {
+                SetError("ConvertProfile2Values", ret);
+                throw new Exception(ErrorMessage ?? "Conversion of profile data failed.");
+            }
+
+            // 6) Build Profile object (X vs Z)
+            var profile = new Profile(new List<ScanPoint>((int)resolution));
+            for (int i = 0; i < resolution; i++)
+            {
+                profile.Add(new ScanPoint
+                {
+                    X = xValues[i],
+                    Z = zValues[i]
+                });
+            }
+
+            profiles.Add(profile);
+        }
+
+        ErrorMessage = null;
+        return profiles;
+    }
+    finally
+    {
+        // 7) Always stop streaming regardless of errors
+        int stopRet = CLLTI.TransferProfiles(device, TTransferProfileType.NORMAL_TRANSFER, 0);
+        if (stopRet < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("TransferProfiles(stop, encoder)", stopRet);
+        }
+    }
+}
