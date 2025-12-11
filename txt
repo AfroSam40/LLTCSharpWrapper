@@ -152,3 +152,109 @@ public List<Profile> AcquireProfilesEncoderTriggered(
         }
     }
 }
+
+------
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Windows.Media.Media3D;
+
+namespace LLT
+{
+    public class HeightSurface
+    {
+        /// <summary>
+        /// Mean Z-height of this surface (in same units as your points, e.g. mm).
+        /// </summary>
+        public double MeanHeight { get; set; }
+
+        /// <summary>
+        /// Points belonging to this surface.
+        /// </summary>
+        public List<Point3D> Points { get; } = new List<Point3D>();
+    }
+}
+
+------
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Windows.Media.Media3D;
+
+namespace LLT
+{
+    public static class PointCloudProcessing
+    {
+        /// <summary>
+        /// Cluster a multi-surface point cloud into horizontal surfaces based on Z height.
+        /// 
+        /// Assumptions:
+        ///  - Each “surface” is approximately flat (small Z variation within a surface).
+        ///  - Different surfaces are separated in Z by more than 'heightTolerance'.
+        ///
+        /// Returns surfaces sorted by MeanHeight ascending (lowest surface first).
+        /// </summary>
+        /// <param name="points">Input point cloud.</param>
+        /// <param name="heightTolerance">
+        /// Max allowed deviation in Z from the current surface's running mean for a point
+        /// to still belong to that surface (same units as Z, e.g. mm).
+        /// </param>
+        public static List<HeightSurface> ClusterSurfacesByHeight(
+            Point3DCollection points,
+            double heightTolerance)
+        {
+            if (points == null)
+                throw new ArgumentNullException(nameof(points));
+
+            var result = new List<HeightSurface>();
+            if (points.Count == 0)
+                return result;
+
+            // Copy & sort by Z (height)
+            var sorted = points.OrderBy(p => p.Z).ToList();
+
+            // Start first surface
+            var currentSurface = new HeightSurface();
+            currentSurface.Points.Add(sorted[0]);
+            double meanZ = sorted[0].Z;
+            int count = 1;
+
+            for (int i = 1; i < sorted.Count; i++)
+            {
+                var p = sorted[i];
+
+                // Difference from current surface mean height
+                double dz = Math.Abs(p.Z - meanZ);
+
+                if (dz <= heightTolerance)
+                {
+                    // Same surface
+                    currentSurface.Points.Add(p);
+                    count++;
+                    // Update running mean (simple incremental update)
+                    meanZ = meanZ + (p.Z - meanZ) / count;
+                }
+                else
+                {
+                    // Finish old surface
+                    currentSurface.MeanHeight = meanZ;
+                    result.Add(currentSurface);
+
+                    // Start new surface
+                    currentSurface = new HeightSurface();
+                    currentSurface.Points.Add(p);
+                    meanZ = p.Z;
+                    count = 1;
+                }
+            }
+
+            // Add last surface
+            currentSurface.MeanHeight = meanZ;
+            result.Add(currentSurface);
+
+            // Ensure sorted by height (just in case)
+            return result.OrderBy(s => s.MeanHeight).ToList();
+        }
+    }
+}
