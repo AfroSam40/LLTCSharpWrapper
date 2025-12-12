@@ -240,3 +240,77 @@ public async Task<List<Profile>> EncoderAsyncPoll(
         Interlocked.Exchange(ref _asyncInUse, 0);
     }
 }
+
+
+-------- 
+
+public (uint currentMode, uint modeCount) GetUserModeInfo()
+{
+    if (!_connected)
+        throw new InvalidOperationException("Sensor not connected. Call Connect() first.");
+
+    uint current = 0;
+    uint count = 0;
+    int ret = CLLTI.GetActualUserMode(device, ref current, ref count);
+
+    if (ret < CLLTI.GENERAL_FUNCTION_OK)
+    {
+        SetError("GetActualUserMode", ret);
+        throw new Exception(ErrorMessage);
+    }
+
+    return (current, count);
+}
+
+/// <summary>
+/// Save current scanner settings into the given user mode index.
+/// NOTE: valid mode indices depend on the device (typically 0..N-1 or 1..N-1).
+/// </summary>
+public bool SaveToUserMode(uint modeIndex)
+{
+    if (!_connected)
+        throw new InvalidOperationException("Sensor not connected. Call Connect() first.");
+
+    // Optionally validate against count
+    var (_, modeCount) = GetUserModeInfo();
+    if (modeIndex >= modeCount)
+        throw new ArgumentOutOfRangeException(nameof(modeIndex),
+            $"modeIndex must be < {modeCount} (device reports {modeCount} user modes).");
+
+    int ret = CLLTI.ReadWriteUserModes(device, 1, modeIndex); // 1 = write
+    if (ret < CLLTI.GENERAL_FUNCTION_OK)
+    {
+        SetError("ReadWriteUserModes(write)", ret);
+        return false;
+    }
+
+    // Micro-Epsilon sample does a short delay after writing a UM
+    Thread.Sleep(100);
+    ErrorMessage = null;
+    return true;
+}
+
+/// <summary>
+/// Load the given user mode from the scanner (restore settings).
+/// </summary>
+public bool LoadUserMode(uint modeIndex)
+{
+    if (!_connected)
+        throw new InvalidOperationException("Sensor not connected. Call Connect() first.");
+
+    var (_, modeCount) = GetUserModeInfo();
+    if (modeIndex >= modeCount)
+        throw new ArgumentOutOfRangeException(nameof(modeIndex),
+            $"modeIndex must be < {modeCount} (device reports {modeCount} user modes).");
+
+    int ret = CLLTI.ReadWriteUserModes(device, 0, modeIndex); // 0 = read/load
+    if (ret < CLLTI.GENERAL_FUNCTION_OK)
+    {
+        SetError("ReadWriteUserModes(read)", ret);
+        return false;
+    }
+
+    Thread.Sleep(100); // allow settings to settle
+    ErrorMessage = null;
+    return true;
+}
