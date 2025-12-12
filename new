@@ -1,69 +1,7 @@
-/// <summary>
-/// Set the scanner to free-run (internal trigger) at approximately the given frequency (Hz).
-/// Keeps the current exposure time and adjusts idle time so that
-/// (exposure + idle) ≈ 1/frequency.
-/// </summary>
-public bool SetScanFrequencyHz(double frequencyHz)
-{
-    if (!_connected)
-        throw new InvalidOperationException("Sensor not connected. Call Connect() first.");
-
-    if (frequencyHz <= 0)
-        throw new ArgumentOutOfRangeException(nameof(frequencyHz), "frequencyHz must be > 0.");
-
-    // Total period in microseconds for the requested frequency
-    // T = 1/f ⇒ T_us = 1e6 / f
-    double periodUs = 1_000_000.0 / frequencyHz;
-
-    // Keep current exposure time, adjust idle so exposure + idle = period
-    double idleUs = periodUs - _exposureTime;
-
-    // If the requested frequency is too high for the current exposure time,
-    // clamp idle time to 0 and you effectively get the max possible frequency
-    if (idleUs < 0)
-        idleUs = 0;
-
-    uint idle = (uint)Math.Round(idleUs);
-    uint exposure = _exposureTime; // already in µs
-
-    // Make sure we're in internal trigger mode
-    int ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_TRIGGER, CLLTI.TRIG_INTERNAL);
-    if (ret < CLLTI.GENERAL_FUNCTION_OK)
-    {
-        SetError("SetScanFrequencyHz / SetFeature(TRIGGER)", ret);
-        return false;
-    }
-
-    // Set exposure time (µs)
-    ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_EXPOSURE_TIME, exposure);
-    if (ret < CLLTI.GENERAL_FUNCTION_OK)
-    {
-        SetError("SetScanFrequencyHz / SetFeature(EXPOSURE_TIME)", ret);
-        return false;
-    }
-
-    // Set idle time (µs)
-    ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_IDLE_TIME, idle);
-    if (ret < CLLTI.GENERAL_FUNCTION_OK)
-    {
-        SetError("SetScanFrequencyHz / SetFeature(IDLE_TIME)", ret);
-        return false;
-    }
-
-    _idleTime = idle;
-    return true;
-}
-
-/// <summary>
-/// Set the scanner to run at the specified frequency (Hz),
-/// then collect a given number of profiles using the callback-based AsyncPoll.
-/// Timeout is computed automatically from profileCount and frequencyHz
-/// with a configurable safety factor.
-/// </summary>
-public async Task<List<Profile>> CaptureProfilesAtFrequencyAsync(
+public async Task<List<Profile>> CaptureEncoderBatchAsync(
     int profileCount,
-    double frequencyHz,
-    double safetyFactor = 2.0)
+    uint exposureTimeUs,
+    int timeoutMs = 2000)
 {
     if (!_connected)
         throw new InvalidOperationException("Sensor not connected. Call Connect() first.");
@@ -71,378 +9,160 @@ public async Task<List<Profile>> CaptureProfilesAtFrequencyAsync(
     if (profileCount <= 0)
         throw new ArgumentOutOfRangeException(nameof(profileCount), "profileCount must be > 0.");
 
-    if (frequencyHz <= 0)
-        throw new ArgumentOutOfRangeException(nameof(frequencyHz), "frequencyHz must be > 0.");
+    // Prevent running two async acquisitions at once on this device
+    if (Interlocked.Exchange(ref _asyncInUse, 1) == 1)
+        throw new InvalidOperationException("An async acquisition is already running on this sensor.");
 
-    if (safetyFactor <= 0)
-        safetyFactor = 1.0;
+    uint resolution = (uint)_resolution;
 
-    // 1) Configure the LLT to free-run at the requested frequency
-    if (!SetScanFrequencyHz(frequencyHz))
-        throw new Exception(ErrorMessage ?? "Failed to set scan frequency.");
-
-    // Give the device a tiny moment to settle
-    await Task.Delay(50);
-
-    // 2) Compute a reasonable timeout:
-    //    Ideal time (s) = profileCount / frequencyHz
-    //    => in ms: 1000 * profileCount / frequencyHz
-    double idealTotalMs = 1000.0 * profileCount / frequencyHz;
-    double timeoutMsDouble = idealTotalMs * safetyFactor;
-
-    // Enforce some bounds
-    if (timeoutMsDouble < 100)
-        timeoutMsDouble = 100; // at least 100 ms
-    if (timeoutMsDouble > int.MaxValue)
-        timeoutMsDouble = int.MaxValue;
-
-    int timeoutMs = (int)Math.Ceiling(timeoutMsDouble);
-
-    // 3) Use the existing callback-based async polling
-    return await AsyncPoll(profileCount, timeoutMs);
-}
-
-
-
----------
-
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Windows.Media.Media3D;
-
-public class BlockAnalysisResult
-{
-    public Point3DCollection BlockPoints { get; set; } = new Point3DCollection();
-    public double LengthX { get; set; }      // mm
-    public double WidthY { get; set; }       // mm
-    public double HeightZ { get; set; }      // mm
-    public double TopFlatness { get; set; }  // mm (peak-to-valley)
-}
-
---------
-
-public static class PointCloudProcessing
-{
-    /// <summary>
-    /// Subtracts the background point cloud from the scene cloud using a voxel grid
-    /// and returns points that are "new" in the scene (i.e., belonging to the object).
-    /// 
-    /// voxelSize:    size of spatial cell in mm (e.g. 0.1 - 0.5)
-    /// distanceTol:  max distance (mm) to consider a scene point "same as" background
-    /// </summary>
-    public static Point3DCollection SubtractPointClouds(
-        Point3DCollection background,
-        Point3DCollection scene,
-        double voxelSize = 0.2,
-        double distanceTol = 0.1)
+    try
     {
-        if (background == null) throw new ArgumentNullException(nameof(background));
-        if (scene == null) throw new ArgumentNullException(nameof(scene));
-        if (voxelSize <= 0) throw new ArgumentOutOfRangeException(nameof(voxelSize));
-        if (distanceTol <= 0) throw new ArgumentOutOfRangeException(nameof(distanceTol));
+        // --- Configure sensor for encoder-triggered acquisition ---
 
-        var bgGrid = BuildVoxelGrid(background, voxelSize);
-
-        var outPoints = new Point3DCollection();
-        double tol2 = distanceTol * distanceTol;
-
-        foreach (var p in scene)
+        // 1) Exposure time (µs)
+        _exposureTime = exposureTimeUs;
+        int ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_EXPOSURE_TIME, _exposureTime);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
         {
-            // Lookup nearby background points via voxel grid
-            if (!HasNeighborWithin(bgGrid, p, voxelSize, tol2))
+            SetError("SetFeature(EXPOSURE_TIME)", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        // 2) Trigger: encoder-based, RS422 input, rising edge, external active
+        //    (you may need to adjust TRIG_INPUT_* depending on your wiring)
+        uint trigConfig =
+            CLLTI.TRIG_MODE_ENCODER |   // use encoder mode
+            CLLTI.TRIG_INPUT_RS422 |    // encoder on RS422 (IN2/IN3 via RS422 port)
+            CLLTI.TRIG_POLARITY_HIGH |  // rising edge
+            CLLTI.TRIG_EXT_ACTIVE;      // external trigger active
+
+        ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_TRIGGER, trigConfig);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("SetFeature(TRIGGER_ENCODER)", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        // NOTE: If you want "gated encoder" behaviour via multipurpose input,
+        // you'd additionally configure FEATURE_FUNCTION_DIGITAL_IO with
+        // MULTI_DIGIN_GATED_ENCODER and appropriate level/RS422 flags.
+
+        // --- Prepare async state for callback-based acquisition ---
+
+        int singleProfileBytes = checked((int)(resolution * 64));  // same as Poll/AsyncPoll
+        _asyncProfileBuffer = new byte[singleProfileBytes * profileCount];
+        _asyncProfileDataSize = 0;
+        _asyncNeededProfiles = profileCount;
+        _asyncReceivedProfiles = 0;
+        _profileEvent.Reset();
+
+        // Let parameters settle a bit
+        await Task.Delay(120).ConfigureAwait(false);
+
+        // --- Start continuous transmission in NORMAL_CONTAINER_MODE ---
+
+        ret = CLLTI.TransferProfiles(device, TTransferProfileType.NORMAL_CONTAINER_MODE, 1);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("TransferProfiles(start, NORMAL_CONTAINER_MODE)", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        try
+        {
+            // Wait for the callback to collect the requested number of profiles
+            bool signaled = await Task.Run(() => _profileEvent.WaitOne(timeoutMs))
+                                      .ConfigureAwait(false);
+
+            if (!signaled || _asyncReceivedProfiles < _asyncNeededProfiles)
             {
-                // No close background point => part of the "new" object
-                outPoints.Add(p);
+                SetError("CaptureEncoderBatchAsync timeout", CLLTI.ERROR_PROFTRANS_NO_NEW_PROFILE);
+                throw new TimeoutException(
+                    $"Timed out waiting for {_asyncNeededProfiles} profiles. Received: {_asyncReceivedProfiles}");
             }
-        }
 
-        return outPoints;
-    }
-
-    /// <summary>
-    /// Performs subtraction and basic 1-2-3 block analysis:
-    ///  - isolates block points
-    ///  - returns length (X), width (Y), height (Z)
-    ///  - computes flatness of the top surface.
-    /// 
-    /// topSliceThickness: thickness (mm) near max Z to consider as "top surface"
-    /// </summary>
-    public static BlockAnalysisResult SubtractAndAnalyzeBlock(
-        Point3DCollection background,
-        Point3DCollection scene,
-        double voxelSize = 0.2,
-        double distanceTol = 0.1,
-        double topSliceThickness = 0.2)
-    {
-        var blockPoints = SubtractPointClouds(background, scene, voxelSize, distanceTol);
-        if (blockPoints.Count == 0)
-            throw new InvalidOperationException("No points found after subtraction. Check alignment/tolerances.");
-
-        // Basic bounding box
-        double minX = double.PositiveInfinity, maxX = double.NegativeInfinity;
-        double minY = double.PositiveInfinity, maxY = double.NegativeInfinity;
-        double minZ = double.PositiveInfinity, maxZ = double.NegativeInfinity;
-
-        foreach (var p in blockPoints)
-        {
-            if (p.X < minX) minX = p.X;
-            if (p.X > maxX) maxX = p.X;
-            if (p.Y < minY) minY = p.Y;
-            if (p.Y > maxY) maxY = p.Y;
-            if (p.Z < minZ) minZ = p.Z;
-            if (p.Z > maxZ) maxZ = p.Z;
-        }
-
-        double lengthX = maxX - minX;
-        double widthY  = maxY - minY;
-        double heightZ = maxZ - minZ;
-
-        // Top surface: take only points within topSliceThickness of maxZ
-        var topPoints = new List<Point3D>();
-        double zCut = maxZ - topSliceThickness;
-        foreach (var p in blockPoints)
-        {
-            if (p.Z >= zCut)
-                topPoints.Add(p);
-        }
-
-        if (topPoints.Count < 3)
-            throw new InvalidOperationException("Not enough points in top slice to evaluate flatness.");
-
-        double flatness = ComputeTopFlatnessPlaneFit(topPoints);
-
-        return new BlockAnalysisResult
-        {
-            BlockPoints = blockPoints,
-            LengthX = lengthX,
-            WidthY  = widthY,
-            HeightZ = heightZ,
-            TopFlatness = flatness
-        };
-    }
-
-    #region Internal helpers
-
-    // Simple integer 3D key for voxel grid
-    private readonly struct Int3
-    {
-        public readonly int X;
-        public readonly int Y;
-        public readonly int Z;
-
-        public Int3(int x, int y, int z)
-        {
-            X = x; Y = y; Z = z;
-        }
-
-        public override bool Equals(object obj)
-        {
-            return obj is Int3 other &&
-                   other.X == X && other.Y == Y && other.Z == Z;
-        }
-
-        public override int GetHashCode()
-        {
-            unchecked
+            // Sanity check: profile size from callback must match expected bytes
+            if (_asyncProfileDataSize != resolution * 64)
             {
-                int h = 17;
-                h = h * 31 + X;
-                h = h * 31 + Y;
-                h = h * 31 + Z;
-                return h;
+                SetError("CaptureEncoderBatchAsync size mismatch", (int)_asyncProfileDataSize);
+                throw new Exception(
+                    $"Profile size mismatch: expected {resolution * 64}, got {_asyncProfileDataSize}");
             }
-        }
-    }
 
-    private static Dictionary<Int3, List<Point3D>> BuildVoxelGrid(
-        Point3DCollection points,
-        double voxelSize)
-    {
-        var grid = new Dictionary<Int3, List<Point3D>>();
-        double inv = 1.0 / voxelSize;
+            // --- Convert each captured profile into X/Z arrays and wrap as Profile ---
 
-        foreach (var p in points)
-        {
-            int ix = (int)Math.Floor(p.X * inv);
-            int iy = (int)Math.Floor(p.Y * inv);
-            int iz = (int)Math.Floor(p.Z * inv);
+            var profiles = new List<Profile>(_asyncNeededProfiles);
+            var xValues = new double[resolution];
+            var zValues = new double[resolution];
+            var singleBuffer = new byte[singleProfileBytes];
 
-            var key = new Int3(ix, iy, iz);
-            if (!grid.TryGetValue(key, out var list))
+            for (int p = 0; p < _asyncNeededProfiles; p++)
             {
-                list = new List<Point3D>();
-                grid[key] = list;
-            }
-            list.Add(p);
-        }
+                // Copy one profile out of the big async buffer
+                Buffer.BlockCopy(
+                    _asyncProfileBuffer,
+                    p * singleProfileBytes,
+                    singleBuffer,
+                    0,
+                    singleProfileBytes);
 
-        return grid;
-    }
+                ret = CLLTI.ConvertProfile2Values(
+                    device,
+                    singleBuffer,
+                    resolution,
+                    TProfileConfig.PROFILE,
+                    _scannerType,
+                    0,   // reflection 0
+                    1,   // convert to mm
+                    null, null, null,
+                    xValues,
+                    zValues,
+                    null, null);
 
-    private static bool HasNeighborWithin(
-        Dictionary<Int3, List<Point3D>> grid,
-        Point3D p,
-        double voxelSize,
-        double tol2)
-    {
-        double inv = 1.0 / voxelSize;
-        int ix = (int)Math.Floor(p.X * inv);
-        int iy = (int)Math.Floor(p.Y * inv);
-        int iz = (int)Math.Floor(p.Z * inv);
-
-        // Check this cell and neighbors (3x3x3)
-        for (int dx = -1; dx <= 1; dx++)
-        {
-            for (int dy = -1; dy <= 1; dy++)
-            {
-                for (int dz = -1; dz <= 1; dz++)
+                if (((ret & CLLTI.CONVERT_X) == 0) || ((ret & CLLTI.CONVERT_Z) == 0))
                 {
-                    var key = new Int3(ix + dx, iy + dy, iz + dz);
-                    if (!grid.TryGetValue(key, out var list))
-                        continue;
-
-                    foreach (var q in list)
-                    {
-                        double dxp = q.X - p.X;
-                        double dyp = q.Y - p.Y;
-                        double dzp = q.Z - p.Z;
-                        double d2 = dxp * dxp + dyp * dyp + dzp * dzp;
-                        if (d2 <= tol2)
-                            return true;
-                    }
+                    SetError("ConvertProfile2Values", ret);
+                    throw new Exception(ErrorMessage);
                 }
+
+                var prof = new Profile(new List<ScanPoint>((int)resolution));
+                for (int i = 0; i < resolution; i++)
+                {
+                    prof.Add(new ScanPoint
+                    {
+                        X = xValues[i],
+                        Z = zValues[i]
+                    });
+                }
+
+                profiles.Add(prof);
             }
+
+            ErrorMessage = null;
+            return profiles;
         }
-
-        return false;
-    }
-
-    /// <summary>
-    /// Fits plane z = a*x + b*y + c to top points (least squares), then
-    /// returns peak-to-valley distance of points from that plane.
-    /// Assumes top surface roughly horizontal.
-    /// </summary>
-    private static double ComputeTopFlatnessPlaneFit(List<Point3D> points)
-    {
-        int n = points.Count;
-        if (n < 3)
-            throw new ArgumentException("Need at least 3 points to fit a plane.", nameof(points));
-
-        double sumX = 0, sumY = 0, sumZ = 0;
-        double sumXX = 0, sumXY = 0, sumYY = 0;
-        double sumXZ = 0, sumYZ = 0;
-
-        foreach (var p in points)
+        finally
         {
-            double x = p.X;
-            double y = p.Y;
-            double z = p.Z;
+            // Stop transmission
+            CLLTI.TransferProfiles(device, TTransferProfileType.NORMAL_CONTAINER_MODE, 0);
 
-            sumX += x;
-            sumY += y;
-            sumZ += z;
-
-            sumXX += x * x;
-            sumXY += x * y;
-            sumYY += y * y;
-
-            sumXZ += x * z;
-            sumYZ += y * z;
-        }
-
-        // Solve normal equations for least-squares plane z = a*x + b*y + c
-        // [sumXX sumXY sumX] [a]   [sumXZ]
-        // [sumXY sumYY sumY] [b] = [sumYZ]
-        // [sumX  sumY  n   ] [c]   [sumZ ]
-        double[,] A =
-        {
-            { sumXX, sumXY, sumX },
-            { sumXY, sumYY, sumY },
-            { sumX,  sumY,   n   }
-        };
-        double[] B = { sumXZ, sumYZ, sumZ };
-
-        double[] plane = Solve3x3(A, B); // [a, b, c]
-        double a = plane[0], b = plane[1], c = plane[2];
-
-        // Distance from point to plane z = a*x + b*y + c:
-        // plane: a*x + b*y - z + c = 0
-        // n = (a, b, -1)
-        double nx = a, ny = b, nz = -1.0;
-        double norm = Math.Sqrt(nx * nx + ny * ny + nz * nz);
-
-        double minD = double.PositiveInfinity;
-        double maxD = double.NegativeInfinity;
-
-        foreach (var p in points)
-        {
-            double val = a * p.X + b * p.Y - p.Z + c;
-            double d = val / norm;  // signed distance
-
-            if (d < minD) minD = d;
-            if (d > maxD) maxD = d;
-        }
-
-        // Flatness = peak-to-valley distance
-        return maxD - minD;
-    }
-
-    /// <summary>
-    /// Solves a 3x3 linear system A*x = b with naive Gaussian elimination.
-    /// (good enough for this small dense system)
-    /// </summary>
-    private static double[] Solve3x3(double[,] A, double[] b)
-    {
-        // Augmented matrix [A|b]
-        double[,] m = new double[3, 4];
-        for (int i = 0; i < 3; i++)
-        {
-            m[i, 0] = A[i, 0];
-            m[i, 1] = A[i, 1];
-            m[i, 2] = A[i, 2];
-            m[i, 3] = b[i];
-        }
-
-        // Forward elimination
-        for (int pivot = 0; pivot < 3; pivot++)
-        {
-            // pivot row normalization
-            double diag = m[pivot, pivot];
-            if (Math.Abs(diag) < 1e-12)
-                throw new InvalidOperationException("Singular matrix in Solve3x3 (plane fit).");
-
-            for (int col = pivot; col < 4; col++)
-                m[pivot, col] /= diag;
-
-            // eliminate other rows
-            for (int row = 0; row < 3; row++)
+            // (Optionally) restore internal trigger so Poll() keeps working as before
+            // You can comment this out if you want to stay in encoder mode:
+            int retRestore = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_TRIGGER, CLLTI.TRIG_INTERNAL);
+            if (retRestore < CLLTI.GENERAL_FUNCTION_OK)
             {
-                if (row == pivot) continue;
-                double factor = m[row, pivot];
-                for (int col = pivot; col < 4; col++)
-                    m[row, col] -= factor * m[pivot, col];
+                SetError("Restore TRIG_INTERNAL", retRestore);
             }
+
+            // Clear async state
+            _asyncProfileBuffer = null;
+            _asyncProfileDataSize = 0;
+            _asyncNeededProfiles = 0;
+            _asyncReceivedProfiles = 0;
         }
-
-        return new[] { m[0, 3], m[1, 3], m[2, 3] };
     }
-
-    #endregion
+    finally
+    {
+        Interlocked.Exchange(ref _asyncInUse, 0);
+    }
 }
-
------
-
-var result = PointCloudProcessing.SubtractAndAnalyzeBlock(
-    plateCloud,
-    platePlusBlockCloud,
-    voxelSize: 0.2,         // mm, tune based on sampling density
-    distanceTol: 0.1,       // mm, tolerance for “same point”
-    topSliceThickness: 0.2  // mm, how thick the top “layer” is for flatness
-);
-
-var blockPoints   = result.BlockPoints;
-double lengthX    = result.LengthX;
-double widthY     = result.WidthY;
-double heightZ    = result.HeightZ;
-double topFlat    = result.TopFlatness;
