@@ -430,3 +430,19 @@ public static class PointCloudProcessing
 
     #endregion
 }
+
+-----
+
+var result = PointCloudProcessing.SubtractAndAnalyzeBlock(
+    plateCloud,
+    platePlusBlockCloud,
+    voxelSize: 0.2,         // mm, tune based on sampling density
+    distanceTol: 0.1,       // mm, tolerance for “same point”
+    topSliceThickness: 0.2  // mm, how thick the top “layer” is for flatness
+);
+
+var blockPoints   = result.BlockPoints;
+double lengthX    = result.LengthX;
+double widthY     = result.WidthY;
+double heightZ    = result.HeightZ;
+double topFlat    = result.TopFlatness;
