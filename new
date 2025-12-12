@@ -101,3 +101,332 @@ public async Task<List<Profile>> CaptureProfilesAtFrequencyAsync(
     // 3) Use the existing callback-based async polling
     return await AsyncPoll(profileCount, timeoutMs);
 }
+
+
+
+---------
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Windows.Media.Media3D;
+
+public class BlockAnalysisResult
+{
+    public Point3DCollection BlockPoints { get; set; } = new Point3DCollection();
+    public double LengthX { get; set; }      // mm
+    public double WidthY { get; set; }       // mm
+    public double HeightZ { get; set; }      // mm
+    public double TopFlatness { get; set; }  // mm (peak-to-valley)
+}
+
+--------
+
+public static class PointCloudProcessing
+{
+    /// <summary>
+    /// Subtracts the background point cloud from the scene cloud using a voxel grid
+    /// and returns points that are "new" in the scene (i.e., belonging to the object).
+    /// 
+    /// voxelSize:    size of spatial cell in mm (e.g. 0.1 - 0.5)
+    /// distanceTol:  max distance (mm) to consider a scene point "same as" background
+    /// </summary>
+    public static Point3DCollection SubtractPointClouds(
+        Point3DCollection background,
+        Point3DCollection scene,
+        double voxelSize = 0.2,
+        double distanceTol = 0.1)
+    {
+        if (background == null) throw new ArgumentNullException(nameof(background));
+        if (scene == null) throw new ArgumentNullException(nameof(scene));
+        if (voxelSize <= 0) throw new ArgumentOutOfRangeException(nameof(voxelSize));
+        if (distanceTol <= 0) throw new ArgumentOutOfRangeException(nameof(distanceTol));
+
+        var bgGrid = BuildVoxelGrid(background, voxelSize);
+
+        var outPoints = new Point3DCollection();
+        double tol2 = distanceTol * distanceTol;
+
+        foreach (var p in scene)
+        {
+            // Lookup nearby background points via voxel grid
+            if (!HasNeighborWithin(bgGrid, p, voxelSize, tol2))
+            {
+                // No close background point => part of the "new" object
+                outPoints.Add(p);
+            }
+        }
+
+        return outPoints;
+    }
+
+    /// <summary>
+    /// Performs subtraction and basic 1-2-3 block analysis:
+    ///  - isolates block points
+    ///  - returns length (X), width (Y), height (Z)
+    ///  - computes flatness of the top surface.
+    /// 
+    /// topSliceThickness: thickness (mm) near max Z to consider as "top surface"
+    /// </summary>
+    public static BlockAnalysisResult SubtractAndAnalyzeBlock(
+        Point3DCollection background,
+        Point3DCollection scene,
+        double voxelSize = 0.2,
+        double distanceTol = 0.1,
+        double topSliceThickness = 0.2)
+    {
+        var blockPoints = SubtractPointClouds(background, scene, voxelSize, distanceTol);
+        if (blockPoints.Count == 0)
+            throw new InvalidOperationException("No points found after subtraction. Check alignment/tolerances.");
+
+        // Basic bounding box
+        double minX = double.PositiveInfinity, maxX = double.NegativeInfinity;
+        double minY = double.PositiveInfinity, maxY = double.NegativeInfinity;
+        double minZ = double.PositiveInfinity, maxZ = double.NegativeInfinity;
+
+        foreach (var p in blockPoints)
+        {
+            if (p.X < minX) minX = p.X;
+            if (p.X > maxX) maxX = p.X;
+            if (p.Y < minY) minY = p.Y;
+            if (p.Y > maxY) maxY = p.Y;
+            if (p.Z < minZ) minZ = p.Z;
+            if (p.Z > maxZ) maxZ = p.Z;
+        }
+
+        double lengthX = maxX - minX;
+        double widthY  = maxY - minY;
+        double heightZ = maxZ - minZ;
+
+        // Top surface: take only points within topSliceThickness of maxZ
+        var topPoints = new List<Point3D>();
+        double zCut = maxZ - topSliceThickness;
+        foreach (var p in blockPoints)
+        {
+            if (p.Z >= zCut)
+                topPoints.Add(p);
+        }
+
+        if (topPoints.Count < 3)
+            throw new InvalidOperationException("Not enough points in top slice to evaluate flatness.");
+
+        double flatness = ComputeTopFlatnessPlaneFit(topPoints);
+
+        return new BlockAnalysisResult
+        {
+            BlockPoints = blockPoints,
+            LengthX = lengthX,
+            WidthY  = widthY,
+            HeightZ = heightZ,
+            TopFlatness = flatness
+        };
+    }
+
+    #region Internal helpers
+
+    // Simple integer 3D key for voxel grid
+    private readonly struct Int3
+    {
+        public readonly int X;
+        public readonly int Y;
+        public readonly int Z;
+
+        public Int3(int x, int y, int z)
+        {
+            X = x; Y = y; Z = z;
+        }
+
+        public override bool Equals(object obj)
+        {
+            return obj is Int3 other &&
+                   other.X == X && other.Y == Y && other.Z == Z;
+        }
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int h = 17;
+                h = h * 31 + X;
+                h = h * 31 + Y;
+                h = h * 31 + Z;
+                return h;
+            }
+        }
+    }
+
+    private static Dictionary<Int3, List<Point3D>> BuildVoxelGrid(
+        Point3DCollection points,
+        double voxelSize)
+    {
+        var grid = new Dictionary<Int3, List<Point3D>>();
+        double inv = 1.0 / voxelSize;
+
+        foreach (var p in points)
+        {
+            int ix = (int)Math.Floor(p.X * inv);
+            int iy = (int)Math.Floor(p.Y * inv);
+            int iz = (int)Math.Floor(p.Z * inv);
+
+            var key = new Int3(ix, iy, iz);
+            if (!grid.TryGetValue(key, out var list))
+            {
+                list = new List<Point3D>();
+                grid[key] = list;
+            }
+            list.Add(p);
+        }
+
+        return grid;
+    }
+
+    private static bool HasNeighborWithin(
+        Dictionary<Int3, List<Point3D>> grid,
+        Point3D p,
+        double voxelSize,
+        double tol2)
+    {
+        double inv = 1.0 / voxelSize;
+        int ix = (int)Math.Floor(p.X * inv);
+        int iy = (int)Math.Floor(p.Y * inv);
+        int iz = (int)Math.Floor(p.Z * inv);
+
+        // Check this cell and neighbors (3x3x3)
+        for (int dx = -1; dx <= 1; dx++)
+        {
+            for (int dy = -1; dy <= 1; dy++)
+            {
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    var key = new Int3(ix + dx, iy + dy, iz + dz);
+                    if (!grid.TryGetValue(key, out var list))
+                        continue;
+
+                    foreach (var q in list)
+                    {
+                        double dxp = q.X - p.X;
+                        double dyp = q.Y - p.Y;
+                        double dzp = q.Z - p.Z;
+                        double d2 = dxp * dxp + dyp * dyp + dzp * dzp;
+                        if (d2 <= tol2)
+                            return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Fits plane z = a*x + b*y + c to top points (least squares), then
+    /// returns peak-to-valley distance of points from that plane.
+    /// Assumes top surface roughly horizontal.
+    /// </summary>
+    private static double ComputeTopFlatnessPlaneFit(List<Point3D> points)
+    {
+        int n = points.Count;
+        if (n < 3)
+            throw new ArgumentException("Need at least 3 points to fit a plane.", nameof(points));
+
+        double sumX = 0, sumY = 0, sumZ = 0;
+        double sumXX = 0, sumXY = 0, sumYY = 0;
+        double sumXZ = 0, sumYZ = 0;
+
+        foreach (var p in points)
+        {
+            double x = p.X;
+            double y = p.Y;
+            double z = p.Z;
+
+            sumX += x;
+            sumY += y;
+            sumZ += z;
+
+            sumXX += x * x;
+            sumXY += x * y;
+            sumYY += y * y;
+
+            sumXZ += x * z;
+            sumYZ += y * z;
+        }
+
+        // Solve normal equations for least-squares plane z = a*x + b*y + c
+        // [sumXX sumXY sumX] [a]   [sumXZ]
+        // [sumXY sumYY sumY] [b] = [sumYZ]
+        // [sumX  sumY  n   ] [c]   [sumZ ]
+        double[,] A =
+        {
+            { sumXX, sumXY, sumX },
+            { sumXY, sumYY, sumY },
+            { sumX,  sumY,   n   }
+        };
+        double[] B = { sumXZ, sumYZ, sumZ };
+
+        double[] plane = Solve3x3(A, B); // [a, b, c]
+        double a = plane[0], b = plane[1], c = plane[2];
+
+        // Distance from point to plane z = a*x + b*y + c:
+        // plane: a*x + b*y - z + c = 0
+        // n = (a, b, -1)
+        double nx = a, ny = b, nz = -1.0;
+        double norm = Math.Sqrt(nx * nx + ny * ny + nz * nz);
+
+        double minD = double.PositiveInfinity;
+        double maxD = double.NegativeInfinity;
+
+        foreach (var p in points)
+        {
+            double val = a * p.X + b * p.Y - p.Z + c;
+            double d = val / norm;  // signed distance
+
+            if (d < minD) minD = d;
+            if (d > maxD) maxD = d;
+        }
+
+        // Flatness = peak-to-valley distance
+        return maxD - minD;
+    }
+
+    /// <summary>
+    /// Solves a 3x3 linear system A*x = b with naive Gaussian elimination.
+    /// (good enough for this small dense system)
+    /// </summary>
+    private static double[] Solve3x3(double[,] A, double[] b)
+    {
+        // Augmented matrix [A|b]
+        double[,] m = new double[3, 4];
+        for (int i = 0; i < 3; i++)
+        {
+            m[i, 0] = A[i, 0];
+            m[i, 1] = A[i, 1];
+            m[i, 2] = A[i, 2];
+            m[i, 3] = b[i];
+        }
+
+        // Forward elimination
+        for (int pivot = 0; pivot < 3; pivot++)
+        {
+            // pivot row normalization
+            double diag = m[pivot, pivot];
+            if (Math.Abs(diag) < 1e-12)
+                throw new InvalidOperationException("Singular matrix in Solve3x3 (plane fit).");
+
+            for (int col = pivot; col < 4; col++)
+                m[pivot, col] /= diag;
+
+            // eliminate other rows
+            for (int row = 0; row < 3; row++)
+            {
+                if (row == pivot) continue;
+                double factor = m[row, pivot];
+                for (int col = pivot; col < 4; col++)
+                    m[row, col] -= factor * m[pivot, col];
+            }
+        }
+
+        return new[] { m[0, 3], m[1, 3], m[2, 3] };
+    }
+
+    #endregion
+}
