@@ -421,3 +421,76 @@ unsafe
         }
     }
 }
+
+
+
+------  
+
+
+// Assume:
+//   byte[] _batchBuffer         = full container from callback
+//   uint   resolution           = (uint)_resolution;
+//   int    numProfiles          = requested profile count
+//   uint   rearrangementReadback = value from GetFeature(PROFILE_REARRANGEMENT)
+//   TScannerType _scannerType   = from GetLLTType()
+
+var xResults = new double[numProfiles * resolution];
+var zResults = new double[numProfiles * resolution];
+
+// Pin the arrays so the GC won't move them while the DLL writes into them
+GCHandle handleBuf = default;
+GCHandle handleX   = default;
+GCHandle handleZ   = default;
+
+try
+{
+    handleBuf = GCHandle.Alloc(_batchBuffer, GCHandleType.Pinned);
+    handleX   = GCHandle.Alloc(xResults,   GCHandleType.Pinned);
+    handleZ   = GCHandle.Alloc(zResults,   GCHandleType.Pinned);
+
+    IntPtr ptrBuf = handleBuf.AddrOfPinnedObject();
+    IntPtr ptrX   = handleX.AddrOfPinnedObject();
+    IntPtr ptrZ   = handleZ.AddrOfPinnedObject();
+
+    // IMPORTANT: use *your* TConvertContainerParameter from CLLTI.cs,
+    // matching the Micro-Epsilon definition exactly.
+    var param = new CLLTI.TConvertContainerParameter
+    {
+        Container                = ptrBuf,
+        profileRearrangement     = rearrangementReadback,
+        numberOfProfilesToExtract= (uint)numProfiles,
+        scanner                  = (uint)_scannerType,
+        reflectionNumber         = 0,
+        ConvertToMM              = 1,
+        ReflectionWidth          = IntPtr.Zero,
+        MaxIntensity             = IntPtr.Zero,   // or pinned ushort[] if you need it
+        Threshold                = IntPtr.Zero,
+        Moment0                  = IntPtr.Zero,
+        Moment1                  = IntPtr.Zero,
+        X                        = ptrX,
+        Z                        = ptrZ
+    };
+
+    int conv = CLLTI.ConvertContainer2Values(device, param);
+    if (conv < CLLTI.GENERAL_FUNCTION_OK ||
+        (conv & CLLTI.CONVERT_X) == 0 ||
+        (conv & CLLTI.CONVERT_Z) == 0)
+    {
+        SetError("ConvertContainer2Values", conv);
+        return; // or throw
+    }
+}
+finally
+{
+    if (handleBuf.IsAllocated) handleBuf.Free();
+    if (handleX.IsAllocated)   handleX.Free();
+    if (handleZ.IsAllocated)   handleZ.Free();
+}
+
+// Now xResults / zResults contain numProfiles * resolution doubles.
+// Slice them per profile:
+for (int p = 0; p < numProfiles; p++)
+{
+    int offset = p * (int)resolution;
+    // e.g. build your Profile here using xResults[offset + i] / zResults[offset + i]
+}
