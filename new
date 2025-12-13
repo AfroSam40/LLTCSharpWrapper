@@ -494,3 +494,55 @@ for (int p = 0; p < numProfiles; p++)
     int offset = p * (int)resolution;
     // e.g. build your Profile here using xResults[offset + i] / zResults[offset + i]
 }
+
+
+---- 
+using System.Collections.Generic;
+
+namespace LLT
+{
+    public partial class LLTSensor
+    {
+        /// <summary>
+        /// Build a List&lt;Profile&gt; from flattened X/Z arrays coming from container mode.
+        /// xValues / zValues must be of length (profileCount * resolution).
+        /// </summary>
+        private List<Profile> BuildProfilesFromContainer(
+            double[] xValues,
+            double[] zValues,
+            uint resolution,
+            int profileCount)
+        {
+            if (xValues == null) throw new ArgumentNullException(nameof(xValues));
+            if (zValues == null) throw new ArgumentNullException(nameof(zValues));
+            if (xValues.Length != zValues.Length)
+                throw new ArgumentException("xValues and zValues must have same length.");
+            if (xValues.Length != profileCount * (int)resolution)
+                throw new ArgumentException("Array length must be profileCount * resolution.");
+
+            var profiles = new List<Profile>(profileCount);
+
+            for (int p = 0; p < profileCount; p++)
+            {
+                int baseIndex = p * (int)resolution;
+                var points = new List<ScanPoint>((int)resolution);
+
+                for (int i = 0; i < resolution; i++)
+                {
+                    double x = xValues[baseIndex + i];
+                    double z = zValues[baseIndex + i];
+
+                    points.Add(new ScanPoint
+                    {
+                        X = x,
+                        Z = z
+                    });
+                }
+
+                profiles.Add(new Profile(points));
+            }
+
+            return profiles;
+        }
+    }
+}
