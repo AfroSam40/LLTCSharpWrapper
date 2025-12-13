@@ -371,3 +371,53 @@ public class LLTBatchEncoder
         _batchEvent.Set(); // wake up AcquireBatchEncoder
     }
 }
+
+
+------ 
+
+// 12) Convert container → X/Z (mm) using ConvertContainer2Values
+unsafe
+{
+    fixed (byte*   pBuffer = _batchBuffer)
+    fixed (double* pX      = xResults)
+    fixed (double* pZ      = zResults)
+    {
+        var param = new CLLTI.TConvertContainerParameter
+        {
+            // container bytes coming from the callback
+            abyProfileContainer = (IntPtr)pBuffer,
+
+            // same flags you used in Python:
+            // CONTAINER_DATA_Z | CONTAINER_DATA_X | CONTAINER_STRIPE_1 | (containerResolution << 12)
+            uiRearrangement = rearrangement,
+
+            // how many profiles are in this container
+            uiProfileCount = (uint)numProfiles,
+
+            // scanner type from GetLLTType
+            tScannerType  = _scannerType,
+
+            // reflection 0, convert to mm
+            uiReflection  = 0,
+            uiConvertToMM = 1,
+
+            // we don't use these extra outputs
+            pwReflectionWidth = IntPtr.Zero,
+            pwMaxPos          = IntPtr.Zero,
+            pwMaxIntensity    = IntPtr.Zero,
+            pwThreshold       = IntPtr.Zero,
+            padfMoment0       = IntPtr.Zero,
+            padfMoment1       = IntPtr.Zero,
+
+            // X/Z outputs
+            padfX = (IntPtr)pX,
+            padfZ = (IntPtr)pZ
+        };
+
+        int retConv = CLLTI.ConvertContainer2Values(Device, ref param);
+        if (retConv < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            throw new Exception($"ConvertContainer2Values failed: {retConv}");
+        }
+    }
+}
