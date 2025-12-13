@@ -1,165 +1,225 @@
-public async Task<List<Profile>> CaptureEncoderBatchAsync(
-    int profileCount,
+private uint ComputeContainerRearrangement(uint resolution)
+{
+    int idx;
+    switch (resolution)
+    {
+        case 256:  idx = 0; break;
+        case 512:  idx = 1; break;
+        case 1024: idx = 2; break;
+        case 2048: idx = 3; break;
+        default:
+            // Fallback: map power-of-two resolutions to 0..7
+            idx = (int)Math.Round(Math.Log(resolution / 256.0, 2.0));
+            if (idx < 0) idx = 0;
+            if (idx > 7) idx = 7;
+            break;
+    }
+
+    // Match Python: Z + X + stripe 1 + resolution index in upper bits
+    return (uint)(
+        CLLTI.CONTAINER_DATA_Z |
+        CLLTI.CONTAINER_DATA_X |
+        CLLTI.CONTAINER_STRIPE_1 |
+        (idx << 12));
+}
+
+
+---------
+
+public async Task<List<Profile>> CaptureEncoderBatchContainerAsync(
+    int numProfiles,
     uint exposureTimeUs,
-    int timeoutMs = 2000)
+    int timeoutMs = 0)
 {
     if (!_connected)
-        throw new InvalidOperationException("Sensor not connected. Call Connect() first.");
+        throw new InvalidOperationException("Sensor not connected.");
 
-    if (profileCount <= 0)
-        throw new ArgumentOutOfRangeException(nameof(profileCount), "profileCount must be > 0.");
+    if (numProfiles <= 0)
+        throw new ArgumentOutOfRangeException(nameof(numProfiles));
 
-    // Prevent running two async acquisitions at once on this sensor
     if (Interlocked.Exchange(ref _asyncInUse, 1) == 1)
-        throw new InvalidOperationException("An async acquisition is already running on this sensor.");
+        throw new InvalidOperationException("Another async operation is already running.");
 
     uint resolution = (uint)_resolution;
 
     try
     {
-        int singleProfileBytes = checked((int)(resolution * 64));
-        int totalBytes = checked(singleProfileBytes * profileCount);
+        int ret;
 
-        // --- Configure container so ONE container holds ALL requested profiles ---
+        // =========================
+        // 1) Trigger / encoder setup
+        // =========================
 
-        uint maxWidth = 0, maxHeight = 0;
-        int ret = CLLTI.GetMaxProfileContainerSize(device, ref maxWidth, ref maxHeight);
-        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        // Enable encoder maintenance
+        ret = SetFeature(device, FEATURE_FUNCTION_MAINTENANCE, MAINTENANCE_ENCODER_ACTIVE);
+        if (ret < GENERAL_FUNCTION_OK)
         {
-            SetError("GetMaxProfileContainerSize", ret);
+            SetError("SetFeature(MAINTENANCE_ENCODER_ACTIVE)", ret);
             throw new Exception(ErrorMessage);
         }
 
-        uint width = resolution;
-        uint height = (uint)profileCount;
-
-        if (width > maxWidth || height > maxHeight)
+        // Route 24V digital input to encoder (matches Python "multi_port")
+        uint multiPort = MULTI_DIGIN_ENC_INDEX | MULTI_LEVEL_SV | MULTI_INPUT_PULLUP;
+        ret = SetFeature(device, FEATURE_FUNCTION_DIGITAL_IO, multiPort);
+        if (ret < GENERAL_FUNCTION_OK)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(profileCount),
-                $"Requested container size {width}x{height} exceeds max {maxWidth}x{maxHeight}.");
-        }
-
-        ret = CLLTI.SetProfileContainerSize(device, width, height);
-        if (ret < CLLTI.GENERAL_FUNCTION_OK)
-        {
-            SetError("SetProfileContainerSize", ret);
+            SetError("SetFeature(DIGITAL_IO)", ret);
             throw new Exception(ErrorMessage);
         }
 
-        // --- Configure encoder-trigger mode & exposure time ---
+        // Trigger mode: encoder on digital input, external active
+        uint trigger = TRIG_MODE_ENCODER | TRIG_INPUT_DIGIN | TRIG_EXT_ACTIVE;
+        ret = SetFeature(device, FEATURE_FUNCTION_TRIGGER, trigger);
+        if (ret < GENERAL_FUNCTION_OK)
+        {
+            SetError("SetFeature(TRIGGER ENCODER)", ret);
+            throw new Exception(ErrorMessage);
+        }
 
-        _exposureTime = exposureTimeUs;
-        ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_EXPOSURE_TIME, _exposureTime);
-        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        // Exposure time (Python uses microseconds as well)
+        ret = SetFeature(device, FEATURE_FUNCTION_EXPOSURE_TIME, exposureTimeUs);
+        if (ret < GENERAL_FUNCTION_OK)
         {
             SetError("SetFeature(EXPOSURE_TIME)", ret);
             throw new Exception(ErrorMessage);
         }
 
-        // Encoder trigger on RS422, rising edge (tweak if needed)
-        uint trigConfig =
-            CLLTI.TRIG_MODE_ENCODER |
-            CLLTI.TRIG_INPUT_RS422 |
-            CLLTI.TRIG_POLARITY_HIGH |
-            CLLTI.TRIG_EXT_ACTIVE;
+        // =========================
+        // 2) Rearrangement & container config
+        // =========================
 
-        ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_TRIGGER, trigConfig);
-        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        uint rearrangement = ComputeContainerRearrangement(resolution);
+        ret = SetFeature(device, FEATURE_FUNCTION_PROFILE_REARRANGEMENT, rearrangement);
+        if (ret < GENERAL_FUNCTION_OK)
         {
-            SetError("SetFeature(TRIGGER_ENCODER)", ret);
+            SetError("SetFeature(PROFILE_REARRANGEMENT)", ret);
             throw new Exception(ErrorMessage);
         }
 
-        // --- Prepare async state for callback ---
+        // Profile config: CONTAINER (not PROFILE)
+        ret = SetProfileConfig(device, TProfileConfig.CONTAINER);
+        if (ret < GENERAL_FUNCTION_OK)
+        {
+            SetError("SetProfileConfig(CONTAINER)", ret);
+            throw new Exception(ErrorMessage);
+        }
 
-        _asyncProfileBuffer = new byte[totalBytes];
-        _asyncProfileDataSize = (uint)singleProfileBytes; // per-profile size
-        _asyncNeededProfiles = profileCount;
-        _asyncReceivedProfiles = 0;
+        // Container size: Python uses width=0, height=numProfiles
+        // width=0 => scanner chooses appropriate width based on rearrangement
+        ret = SetProfileContainerSize(device, 0, (uint)numProfiles);
+        if (ret < GENERAL_FUNCTION_OK)
+        {
+            SetError("SetProfileContainerSize", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        // =========================
+        // 3) Allocate buffer like Python: resolution * 4 * numProfiles
+        // =========================
+
+        int containerBytes = checked((int)(resolution * 4u * (uint)numProfiles));
+        _asyncProfileBuffer      = new byte[containerBytes];
+        _asyncProfileDataSize    = 0;
+        _asyncExpectedChunkBytes = containerBytes;
+        _asyncNeededProfiles     = 1;     // exactly one container callback
+        _asyncReceivedProfiles   = 0;
         _profileEvent.Reset();
 
-        // Let settings settle
-        await Task.Delay(120).ConfigureAwait(false);
-
-        // --- Start transmission in NORMAL_CONTAINER_MODE ---
-
-        ret = CLLTI.TransferProfiles(device, TTransferProfileType.NORMAL_CONTAINER_MODE, 1);
-        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        if (timeoutMs <= 0)
         {
-            SetError("TransferProfiles(start, NORMAL_CONTAINER_MODE)", ret);
+            // Python uses event.wait(90) seconds
+            timeoutMs = 90000;
+        }
+
+        // Warmup like Python's "time.sleep(0.1)"
+        await Task.Delay(100);
+
+        // =========================
+        // 4) Start transfer in NORMAL_CONTAINER_MODE
+        // =========================
+
+        ret = TransferProfiles(device, TTransferProfileType.NORMAL_CONTAINER_MODE, 1);
+        if (ret < GENERAL_FUNCTION_OK)
+        {
+            SetError("TransferProfiles(NORMAL_CONTAINER_MODE,1)", ret);
             throw new Exception(ErrorMessage);
         }
 
         try
         {
-            // Wait for a single container that holds all profiles
-            bool signaled = await Task
-                .Run(() => _profileEvent.WaitOne(timeoutMs))
-                .ConfigureAwait(false);
-
-            if (!signaled || _asyncReceivedProfiles < _asyncNeededProfiles)
+            bool gotEvent = await Task.Run(() => _profileEvent.WaitOne(timeoutMs));
+            if (!gotEvent)
             {
-                SetError("CaptureEncoderBatchAsync timeout", CLLTI.ERROR_PROFTRANS_NO_NEW_PROFILE);
-                throw new TimeoutException(
-                    $"Timed out waiting for {_asyncNeededProfiles} profiles in container. Received: {_asyncReceivedProfiles}");
+                SetError("CaptureEncoderBatchContainerAsync timeout", ERROR_PROFTRANS_NO_NEW_PROFILE);
+                throw new TimeoutException("Timeout waiting for container.");
             }
 
-            // Sanity check: make sure we really got N profiles worth of bytes
-            int expectedBytes = singleProfileBytes * _asyncNeededProfiles;
-            if (_asyncProfileBuffer == null || _asyncProfileBuffer.Length < expectedBytes)
+            if (_asyncProfileDataSize != (uint)containerBytes)
             {
-                SetError("CaptureEncoderBatchAsync buffer size mismatch", -1);
-                throw new Exception("Internal async buffer size mismatch.");
+                // This is exactly where your "size does not meet expected" used to show up.
+                // With the 4-bytes-per-point size, this should now match.
+                SetError("Container size mismatch", (int)_asyncProfileDataSize);
+                throw new Exception($"Expected {containerBytes} bytes, got {_asyncProfileDataSize}");
             }
 
-            // --- Convert profiles from big container buffer to List<Profile> ---
+            // =========================
+            // 5) Convert container to X/Z via ConvertContainer2Values
+            // =========================
 
-            var profiles = new List<Profile>(_asyncNeededProfiles);
-            var xValues = new double[resolution];
-            var zValues = new double[resolution];
-            var singleBuffer = new byte[singleProfileBytes];
+            uint resultsSize = resolution * (uint)numProfiles; // same as Python: results_size = resolution * num_profiles
+            var xResults = new double[resultsSize];
+            var zResults = new double[resultsSize];
 
-            for (int p = 0; p < _asyncNeededProfiles; p++)
+            // You'll need the exact struct from your C# wrapper:
+            // It should correspond to Python's TConvertContainerParameter.
+            var param = new TConvertContainerParameter
             {
-                // Take slice p from container
-                Buffer.BlockCopy(
-                    _asyncProfileBuffer,
-                    p * singleProfileBytes,
-                    singleBuffer,
-                    0,
-                    singleProfileBytes);
+                // Field names may differ slightly in your wrapper – adapt as needed.
+                abyProfileContainer = _asyncProfileBuffer,
+                uiRearrangement     = rearrangement,
+                uiProfileCount      = (uint)numProfiles,
+                tScannerType        = _scannerType,
+                uiReflection        = 0,
+                uiConvertToMM       = 1,
+                padwValidMask       = null,
+                padwMaxPos          = null,
+                padwMaxWidth        = null,
+                padfX               = xResults,
+                padfZ               = zResults,
+                padfM0              = null,
+                padfM1              = null
+            };
 
-                ret = CLLTI.ConvertProfile2Values(
-                    device,
-                    singleBuffer,
-                    resolution,
-                    TProfileConfig.PROFILE,
-                    _scannerType,
-                    0,   // reflection 0
-                    1,   // convert to mm
-                    null, null, null,
-                    xValues,
-                    zValues,
-                    null, null);
+            ret = ConvertContainer2Values(device, ref param);
+            if (ret < GENERAL_FUNCTION_OK ||
+                ((ret & CONVERT_X) == 0) ||
+                ((ret & CONVERT_Z) == 0))
+            {
+                SetError("ConvertContainer2Values", ret);
+                throw new Exception(ErrorMessage);
+            }
 
-                if (((ret & CLLTI.CONVERT_X) == 0) || ((ret & CLLTI.CONVERT_Z) == 0))
-                {
-                    SetError("ConvertProfile2Values", ret);
-                    throw new Exception(ErrorMessage);
-                }
+            // =========================
+            // 6) Slice X/Z into Profile objects
+            // =========================
 
-                var prof = new Profile(new List<ScanPoint>((int)resolution));
+            var profiles = new List<Profile>(numProfiles);
+
+            for (int p = 0; p < numProfiles; p++)
+            {
+                var list = new List<ScanPoint>((int)resolution);
+                int offset = p * (int)resolution;
+
                 for (int i = 0; i < resolution; i++)
                 {
-                    prof.Add(new ScanPoint
+                    list.Add(new ScanPoint
                     {
-                        X = xValues[i],
-                        Z = zValues[i]
+                        X = xResults[offset + i],
+                        Z = zResults[offset + i]
                     });
                 }
 
-                profiles.Add(prof);
+                profiles.Add(new Profile(list));
             }
 
             ErrorMessage = null;
@@ -167,64 +227,17 @@ public async Task<List<Profile>> CaptureEncoderBatchAsync(
         }
         finally
         {
-            // Stop transmission
-            CLLTI.TransferProfiles(device, TTransferProfileType.NORMAL_CONTAINER_MODE, 0);
+            TransferProfiles(device, TTransferProfileType.NORMAL_CONTAINER_MODE, 0);
 
-            // Optionally restore internal trigger so Poll() behaves as before
-            int retRestore = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_TRIGGER, CLLTI.TRIG_INTERNAL);
-            if (retRestore < CLLTI.GENERAL_FUNCTION_OK)
-            {
-                SetError("Restore TRIG_INTERNAL", retRestore);
-            }
-
-            // Clear async state
-            _asyncProfileBuffer = null;
-            _asyncProfileDataSize = 0;
-            _asyncNeededProfiles = 0;
-            _asyncReceivedProfiles = 0;
+            _asyncProfileBuffer      = null;
+            _asyncProfileDataSize    = 0;
+            _asyncExpectedChunkBytes = 0;
+            _asyncNeededProfiles     = 0;
+            _asyncReceivedProfiles   = 0;
         }
     }
     finally
     {
         Interlocked.Exchange(ref _asyncInUse, 0);
     }
-}
-
-
------
-
-unsafe private void OnProfileCallback(byte* data, uint size)
-{
-    if (size == 0)
-        return;
-
-    // If we aren't currently waiting, ignore
-    if (_asyncProfileBuffer == null || _asyncNeededProfiles <= 0)
-        return;
-
-    // If we've already got what we need, ignore extra callbacks
-    if (_asyncReceivedProfiles >= _asyncNeededProfiles)
-        return;
-
-    int singleProfileBytes = (int)_asyncProfileDataSize;
-    if (singleProfileBytes <= 0)
-        return; // not configured yet
-
-    int expectedBytes = singleProfileBytes * _asyncNeededProfiles;
-    if (size != expectedBytes)
-    {
-        // Container size not what we expect – bail out
-        // (you could log this via ErrorMessage if you want)
-        return;
-    }
-
-    // Copy entire container into async buffer
-    IntPtr srcPtr = new IntPtr(data);
-    Marshal.Copy(srcPtr, _asyncProfileBuffer, 0, (int)size);
-
-    // Mark all profiles as received
-    _asyncReceivedProfiles = _asyncNeededProfiles;
-
-    // Signal waiting async method
-    _profileEvent.Set();
 }
