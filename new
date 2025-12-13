@@ -1,315 +1,373 @@
-// For batch container acquisition
-private readonly AutoResetEvent _batchEvent = new AutoResetEvent(false);
-private byte[]? _batchBuffer;
-private uint _batchSizeBytes;
+using System;
+using System.Collections.Generic;
+using System.Text;
+using System.Threading;
+using MEScanControl;   // Namespace that contains CLLTI, TScannerType, etc.
 
-// Keep delegate alive so GC doesn't collect it
-private static readonly ProfileReceiveMethod _containerCbDelegate = ContainerCallbackStatic;
-
-
-----
-
-private static readonly object _cbLock = new object();
-private static readonly Dictionary<uint, LLTSensor> _instances = new();
-
-private void RegisterInstance()
+public class LLTBatchEncoder
 {
-    lock (_cbLock)
+    // --- Public API ---------------------------------------------------------
+
+    public enum LLT30x430Resolutions
     {
-        _instances[device] = this;
-    }
-}
-
-private static LLTSensor? GetInstance(uint userData)
-{
-    lock (_cbLock)
-    {
-        _instances.TryGetValue(userData, out var inst);
-        return inst;
-    }
-}
-
------
-
-// Static wrapper used by RegisterCallback
-unsafe private static void ContainerCallbackStatic(byte* data, uint size, uint userData)
-{
-    var sensor = GetInstance(userData);
-    sensor?.OnContainerCallback(data, size);
-}
-
-// Instance logic – this is the real equivalent of the Python callback
-unsafe private void OnContainerCallback(byte* data, uint size)
-{
-    if (size == 0 || _batchBuffer == null)
-        return;
-
-    int toCopy = (int)Math.Min((uint)_batchBuffer.Length, size);
-
-    fixed (byte* dst = &_batchBuffer[0])
-    {
-        Buffer.MemoryCopy(
-            source: data,
-            destination: dst,
-            destinationSizeInBytes: _batchBuffer.Length,
-            sourceBytesToCopy: toCopy);
+        R256  = 256,
+        R512  = 512,
+        R1024 = 1024,
+        R2048 = 2048
     }
 
-    _batchSizeBytes = (uint)toCopy;
-    _batchEvent.Set();      // wake up AcquireBatchEncoder
-}
+    /// <summary>Handle of an already-created & connected LLT device.</summary>
+    public uint Device { get; }
 
+    /// <summary>Last translated error message (if any).</summary>
+    public string ErrorMessage { get; private set; }
 
-----
-
-public (double[,] X, double[,] Z) AcquireBatchEncoder(
-    int numProfiles,
-    LLT30x430Resolutions resolutionEnum,
-    uint exposureTimeUs = 500,
-    int timeoutSeconds = 90)
-{
-    if (!_connected)
-        throw new InvalidOperationException("Sensor not connected.");
-
-    if (numProfiles <= 0)
-        throw new ArgumentOutOfRangeException(nameof(numProfiles));
-
-    int ret;
-    uint resolution = (uint)resolutionEnum;
-
-    // -----------------------------
-    // 1) Set resolution
-    // -----------------------------
-    ret = SetResolution(device, resolution);
-    if (ret < GENERAL_FUNCTION_OK)
+    /// <summary>
+    /// Create a batch-encoder helper for an already-connected sensor.
+    /// </summary>
+    public LLTBatchEncoder(uint deviceHandle)
     {
-        SetError("SetResolution", ret);
-        throw new Exception(ErrorMessage);
-    }
+        Device = deviceHandle;
 
-    _resolution = resolutionEnum;  // keep in sync with hardware
-
-    // -----------------------------
-    // 2) Allocate buffers (Python: profile_buffer, x_results, z_results)
-    //    profile_buffer = (c_ubyte * (resolution * 4 * num_profiles))()
-    // -----------------------------
-    int containerBytes = checked((int)(resolution * 4u * (uint)numProfiles));
-    _batchBuffer = new byte[containerBytes];
-    _batchSizeBytes = 0;
-
-    uint resultsSize = resolution * (uint)numProfiles;
-    var xResults = new double[resultsSize];
-    var zResults = new double[resultsSize];
-
-    // -----------------------------
-    // 3) Profile config: CONTAINER
-    // -----------------------------
-    ret = SetProfileConfig(device, TProfileConfig.CONTAINER);
-    if (ret < GENERAL_FUNCTION_OK)
-    {
-        SetError("SetProfileConfig(CONTAINER)", ret);
-        throw new Exception(ErrorMessage);
-    }
-
-    // -----------------------------
-    // 4) Trigger settings (encoder)
-    //    trigger = TRIG_MODE_ENCODER | TRIG_INPUT_DIGIN | TRIG_EXT_ACTIVE
-    // -----------------------------
-    uint trigger = TRIG_MODE_ENCODER | TRIG_INPUT_DIGIN | TRIG_EXT_ACTIVE;
-    ret = SetFeature(device, FEATURE_FUNCTION_TRIGGER, trigger);
-    if (ret < GENERAL_FUNCTION_OK)
-    {
-        SetError("SetFeature(TRIGGER ENCODER)", ret);
-        throw new Exception(ErrorMessage);
-    }
-
-    // -----------------------------
-    // 5) Route digital input to encoder
-    //    multi_port = MULTI_DIGIN_ENC_INDEX | MULTI_LEVEL_SV | MULTI_INPUT_PULLUP
-    // -----------------------------
-    uint multiPort = MULTI_DIGIN_ENC_INDEX | MULTI_LEVEL_SV | MULTI_INPUT_PULLUP;
-    ret = SetFeature(device, FEATURE_FUNCTION_DIGITAL_IO, multiPort);
-    if (ret < GENERAL_FUNCTION_OK)
-    {
-        SetError("SetFeature(DIGITAL_IO)", ret);
-        throw new Exception(ErrorMessage);
-    }
-
-    // -----------------------------
-    // 6) Enable encoder in maintenance register
-    //    encoder = get_feature(... MAINTENANCE ...)
-    //    encoder |= MAINTENANCE_ENCODER_ACTIVE
-    // -----------------------------
-    uint encoder = 0;
-    ret = GetFeature(device, FEATURE_FUNCTION_MAINTENANCE, ref encoder);
-    if (ret < GENERAL_FUNCTION_OK)
-    {
-        SetError("GetFeature(MAINTENANCE)", ret);
-        throw new Exception(ErrorMessage);
-    }
-
-    encoder |= MAINTENANCE_ENCODER_ACTIVE;
-
-    ret = SetFeature(device, FEATURE_FUNCTION_MAINTENANCE, encoder);
-    if (ret < GENERAL_FUNCTION_OK)
-    {
-        SetError("SetFeature(MAINTENANCE_ENCODER_ACTIVE)", ret);
-        throw new Exception(ErrorMessage);
-    }
-
-    // -----------------------------
-    // 7) Exposure time
-    //    set_feature(... EXPOSURE_TIME, exposure_time)
-    // -----------------------------
-    ret = SetFeature(device, FEATURE_FUNCTION_EXPOSURE_TIME, exposureTimeUs);
-    if (ret < GENERAL_FUNCTION_OK)
-    {
-        SetError("SetFeature(EXPOSURE_TIME)", ret);
-        throw new Exception(ErrorMessage);
-    }
-
-    // -----------------------------
-    // 8) Rearrangement (same math as Python)
-    //    rec_log2 = 1.0 / log(2.0)
-    //    container_resolution = floor(log(resolution) * rec_log2 + 0.5)
-    //    FEATURE_FUNCTION_PROFILE_REARRANGEMENT = DATA_Z | DATA_X | STRIPE_1 | (idx << 12)
-    // -----------------------------
-    double recLog2 = 1.0 / Math.Log(2.0);
-    uint containerResolutionIdx =
-        (uint)Math.Floor(Math.Log(resolution) * recLog2 + 0.5);
-
-    uint rearrangementValue =
-        CONTAINER_DATA_Z |
-        CONTAINER_DATA_X |
-        CONTAINER_STRIPE_1 |
-        (containerResolutionIdx << 12);
-
-    ret = SetFeature(device, FEATURE_FUNCTION_PROFILE_REARRANGEMENT, rearrangementValue);
-    if (ret < GENERAL_FUNCTION_OK)
-    {
-        SetError("SetFeature(PROFILE_REARRANGEMENT)", ret);
-        throw new Exception(ErrorMessage);
-    }
-
-    // Read back rearrangement (Python does this and passes it to convert)
-    uint rearrangement = 0;
-    ret = GetFeature(device, FEATURE_FUNCTION_PROFILE_REARRANGEMENT, ref rearrangement);
-    if (ret < GENERAL_FUNCTION_OK)
-    {
-        SetError("GetFeature(PROFILE_REARRANGEMENT)", ret);
-        throw new Exception(ErrorMessage);
-    }
-
-    // -----------------------------
-    // 9) Container size: width=0, height=numProfiles
-    //    set_profile_container_size(hLLT, 0, num_profiles)
-    // -----------------------------
-    ret = SetProfileContainerSize(device, 0, (uint)numProfiles);
-    if (ret < GENERAL_FUNCTION_OK)
-    {
-        SetError("SetProfileContainerSize", ret);
-        throw new Exception(ErrorMessage);
-    }
-
-    // -----------------------------
-    // 10) Register callback (buffer callback in Python)
-    // -----------------------------
-    _batchEvent.Reset();
-
-    ret = RegisterCallback(device, TCallbackType.STD_CALL, _containerCbDelegate, device /* userData */);
-    if (ret < GENERAL_FUNCTION_OK)
-    {
-        SetError("RegisterCallback(CONTAINER)", ret);
-        throw new Exception(ErrorMessage);
-    }
-
-    // -----------------------------
-    // 11) Start transfer in NORMAL_CONTAINER_MODE
-    // -----------------------------
-    ret = TransferProfiles(device, TTransferProfileType.NORMAL_CONTAINER_MODE, 1);
-    if (ret < GENERAL_FUNCTION_OK)
-    {
-        SetError("TransferProfiles(NORMAL_CONTAINER_MODE,1)", ret);
-        throw new Exception(ErrorMessage);
-    }
-
-    try
-    {
-        // Warm-up like Python's time.sleep(0.1)
-        Thread.Sleep(100);
-
-        // Wait for container (Python: event.wait(90))
-        if (!_batchEvent.WaitOne(TimeSpan.FromSeconds(timeoutSeconds)))
+        // Get scanner type once – needed for ConvertContainer2Values
+        int ret = CLLTI.GetLLTType(Device, ref _scannerType);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
         {
-            SetError("AcquireBatchEncoder timeout", ERROR_PROFTRANS_NO_NEW_PROFILE);
-            throw new TimeoutException("Timeout waiting for container.");
-        }
-
-        if (_batchSizeBytes != (uint)containerBytes)
-        {
-            SetError("Container size mismatch", (int)_batchSizeBytes);
-            throw new Exception($"Expected {containerBytes} bytes, got {_batchSizeBytes}");
-        }
-
-        // -----------------------------
-        // 12) Convert container to X/Z (ConvertContainer2Values)
-        //     params = TConvertContainer2Parameter(...)
-        // -----------------------------
-        var nullUShortPtr = IntPtr.Zero;   // equivalent to snull in Python
-        var nullUIntPtr   = IntPtr.Zero;
-
-        var param = new TConvertContainer2Parameter
-        {
-            // Adapt field names to your struct definition:
-            // below is the logical mapping from the Python call
-            abyProfileContainer = _batchBuffer,
-            uiRearrangement     = rearrangement,
-            uiProfileCount      = (uint)numProfiles,
-            tScannerType        = _scannerType,
-            uiReflection        = 0,        // reflection_number
-            bConvertToMM        = true,
-            pwMaxPos            = nullUShortPtr,
-            pwWidth             = nullUShortPtr,
-            pdwValidMask        = nullUIntPtr,
-            pdwMaxWidth         = nullUIntPtr,
-            padfX               = xResults,
-            padfZ               = zResults
-        };
-
-        ret = ConvertContainer2Values(device, ref param);
-        if (ret < GENERAL_FUNCTION_OK ||
-            ((ret & CONVERT_X) == 0) ||
-            ((ret & CONVERT_Z) == 0))
-        {
-            SetError("ConvertContainer2Values", ret);
+            SetError("GetLLTType", ret);
             throw new Exception(ErrorMessage);
         }
 
-        // -----------------------------
-        // 13) Reshape into [numProfiles, resolution]
-        // -----------------------------
-        var xMatrix = new double[numProfiles, resolution];
-        var zMatrix = new double[numProfiles, resolution];
-
-        int idx = 0;
-        for (int p = 0; p < numProfiles; p++)
+        // Register this instance so the static callback can route to it
+        lock (_cbLock)
         {
-            for (int i = 0; i < resolution; i++, idx++)
-            {
-                xMatrix[p, i] = xResults[idx];
-                zMatrix[p, i] = zResults[idx];
-            }
+            _instances[Device] = this;
+        }
+    }
+
+    /// <summary>
+    /// Acquire a batch of profiles using encoder trigger and container mode,
+    /// and return (X,Z) as [numProfiles, resolution] matrices (in mm).
+    ///
+    /// This is the C# equivalent of the Python "aquire_batch_encoder".
+    /// The device must already be connected.
+    /// </summary>
+    /// <param name="numProfiles">Number of encoder-triggered profiles to capture.</param>
+    /// <param name="resolutionEnum">Sensor resolution to use.</param>
+    /// <param name="exposureTimeUs">Exposure time in microseconds.</param>
+    /// <param name="timeoutSeconds">Timeout waiting for the container.</param>
+    public (double[,] X, double[,] Z) AcquireBatchEncoder(
+        int numProfiles,
+        LLT30x430Resolutions resolutionEnum,
+        uint exposureTimeUs = 500,
+        int timeoutSeconds = 90)
+    {
+        if (numProfiles <= 0)
+            throw new ArgumentOutOfRangeException(nameof(numProfiles));
+
+        int ret;
+        uint resolution = (uint)resolutionEnum;
+
+        // --------------------------------------------------------------------
+        // 1) Set resolution
+        // --------------------------------------------------------------------
+        ret = CLLTI.SetResolution(Device, resolution);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("SetResolution", ret);
+            throw new Exception(ErrorMessage);
         }
 
-        ErrorMessage = null;
-        return (xMatrix, zMatrix);
-    }
-    finally
-    {
-        // Stop transfer
-        TransferProfiles(device, TTransferProfileType.NORMAL_CONTAINER_MODE, 0);
-
-        _batchBuffer   = null;
+        // --------------------------------------------------------------------
+        // 2) Allocate buffers (like Python: profile_buffer, x_results, z_results)
+        //    profile_buffer = resolution * 4 * num_profiles  (bytes)
+        // --------------------------------------------------------------------
+        int containerBytes = checked((int)(resolution * 4u * (uint)numProfiles));
+        _batchBuffer = new byte[containerBytes];
         _batchSizeBytes = 0;
+
+        uint samplesCount = resolution * (uint)numProfiles;
+        var xResults = new double[samplesCount];
+        var zResults = new double[samplesCount];
+
+        // --------------------------------------------------------------------
+        // 3) Profile config: CONTAINER
+        // --------------------------------------------------------------------
+        ret = CLLTI.SetProfileConfig(Device, TProfileConfig.CONTAINER);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("SetProfileConfig(CONTAINER)", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        // --------------------------------------------------------------------
+        // 4) Trigger settings (encoder)
+        //    trigger = TRIG_MODE_ENCODER | TRIG_INPUT_DIGIN | TRIG_EXT_ACTIVE
+        // --------------------------------------------------------------------
+        uint trigger = CLLTI.TRIG_MODE_ENCODER | CLLTI.TRIG_INPUT_DIGIN | CLLTI.TRIG_EXT_ACTIVE;
+        ret = CLLTI.SetFeature(Device, CLLTI.FEATURE_FUNCTION_TRIGGER, trigger);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("SetFeature(TRIGGER ENCODER)", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        // --------------------------------------------------------------------
+        // 5) Route digital input to encoder
+        //    multi_port = MULTI_DIGIN_ENC_INDEX | MULTI_LEVEL_SV | MULTI_INPUT_PULLUP
+        // --------------------------------------------------------------------
+        uint multiPort = CLLTI.MULTI_DIGIN_ENC_INDEX | CLLTI.MULTI_LEVEL_SV | CLLTI.MULTI_INPUT_PULLUP;
+        ret = CLLTI.SetFeature(Device, CLLTI.FEATURE_FUNCTION_DIGITAL_IO, multiPort);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("SetFeature(DIGITAL_IO)", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        // --------------------------------------------------------------------
+        // 6) Enable encoder in maintenance register
+        // --------------------------------------------------------------------
+        uint encoder = 0;
+        ret = CLLTI.GetFeature(Device, CLLTI.FEATURE_FUNCTION_MAINTENANCE, ref encoder);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("GetFeature(MAINTENANCE)", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        encoder |= CLLTI.MAINTENANCE_ENCODER_ACTIVE;
+        ret = CLLTI.SetFeature(Device, CLLTI.FEATURE_FUNCTION_MAINTENANCE, encoder);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("SetFeature(MAINTENANCE_ENCODER_ACTIVE)", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        // --------------------------------------------------------------------
+        // 7) Exposure time (µs)
+        // --------------------------------------------------------------------
+        ret = CLLTI.SetFeature(Device, CLLTI.FEATURE_FUNCTION_EXPOSURE_TIME, exposureTimeUs);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("SetFeature(EXPOSURE_TIME)", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        // --------------------------------------------------------------------
+        // 8) Rearrangement (same math as Python)
+        //    rec_log2 = 1.0 / log(2.0)
+        //    container_resolution = floor(log(resolution) * rec_log2 + 0.5)
+        //    PROFILE_REARRANGEMENT = DATA_Z | DATA_X | STRIPE_1 | (idx << 12)
+        // --------------------------------------------------------------------
+        double recLog2 = 1.0 / Math.Log(2.0);
+        uint containerResolutionIdx =
+            (uint)Math.Floor(Math.Log(resolution) * recLog2 + 0.5);
+
+        uint rearrangementValue =
+            CLLTI.CONTAINER_DATA_Z |
+            CLLTI.CONTAINER_DATA_X |
+            CLLTI.CONTAINER_STRIPE_1 |
+            (containerResolutionIdx << 12);
+
+        ret = CLLTI.SetFeature(Device, CLLTI.FEATURE_FUNCTION_PROFILE_REARRANGEMENT, rearrangementValue);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("SetFeature(PROFILE_REARRANGEMENT)", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        uint rearrangement = 0;
+        ret = CLLTI.GetFeature(Device, CLLTI.FEATURE_FUNCTION_PROFILE_REARRANGEMENT, ref rearrangement);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("GetFeature(PROFILE_REARRANGEMENT)", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        // --------------------------------------------------------------------
+        // 9) Container size: width = 0, height = numProfiles
+        // --------------------------------------------------------------------
+        ret = CLLTI.SetProfileContainerSize(Device, 0, (uint)numProfiles);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("SetProfileContainerSize", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        // --------------------------------------------------------------------
+        // 10) Register callback for container buffer
+        // --------------------------------------------------------------------
+        _batchEvent.Reset();
+        ret = CLLTI.RegisterCallback(Device, TCallbackType.STD_CALL, _containerCbDelegate, Device);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("RegisterCallback", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        // --------------------------------------------------------------------
+        // 11) Start transfer in NORMAL_CONTAINER_MODE
+        // --------------------------------------------------------------------
+        ret = CLLTI.TransferProfiles(Device, TTransferProfileType.NORMAL_CONTAINER_MODE, 1);
+        if (ret < CLLTI.GENERAL_FUNCTION_OK)
+        {
+            SetError("TransferProfiles(start)", ret);
+            throw new Exception(ErrorMessage);
+        }
+
+        try
+        {
+            // Brief warm-up, same idea as time.sleep(0.1) in Python
+            Thread.Sleep(100);
+
+            // Wait for container to arrive
+            if (!_batchEvent.WaitOne(TimeSpan.FromSeconds(timeoutSeconds)))
+            {
+                SetError("AcquireBatchEncoder timeout", CLLTI.ERROR_PROFTRANS_NO_NEW_PROFILE);
+                throw new TimeoutException("Timeout waiting for container.");
+            }
+
+            if (_batchSizeBytes != (uint)containerBytes)
+            {
+                SetError("Container size mismatch", (int)_batchSizeBytes);
+                throw new Exception($"Expected {containerBytes} bytes, got {_batchSizeBytes}");
+            }
+
+            // ----------------------------------------------------------------
+            // 12) Convert container → X/Z (mm) using ConvertContainer2Values
+            // ----------------------------------------------------------------
+            unsafe
+            {
+                fixed (byte* pBuffer = _batchBuffer)
+                fixed (double* pX = xResults)
+                fixed (double* pZ = zResults)
+                {
+                    // Adjust field names to your existing TConvertContainer2Parameter
+                    TConvertContainer2Parameter param = new TConvertContainer2Parameter
+                    {
+                        abyProfileContainer = (IntPtr)pBuffer,
+                        uiRearrangement     = rearrangement,
+                        uiProfileCount      = (uint)numProfiles,
+                        tScannerType        = _scannerType,
+                        uiReflection        = 0,
+                        bEnable             = true,
+                        pwMaxPos            = IntPtr.Zero,
+                        pwWidth             = IntPtr.Zero,
+                        pdwValidMask        = IntPtr.Zero,
+                        pdwMaxWidth         = IntPtr.Zero,
+                        padfX               = (IntPtr)pX,
+                        padfZ               = (IntPtr)pZ
+                    };
+
+                    int retConv = CLLTI.ConvertContainer2Values(Device, ref param);
+                    if (retConv < CLLTI.GENERAL_FUNCTION_OK ||
+                        (retConv & CLLTI.CONVERT_X) == 0 ||
+                        (retConv & CLLTI.CONVERT_Z) == 0)
+                    {
+                        SetError("ConvertContainer2Values", retConv);
+                        throw new Exception(ErrorMessage);
+                    }
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // 13) Reshape into [numProfiles, resolution] like numpy.reshape
+            // ----------------------------------------------------------------
+            var xMatrix = new double[numProfiles, resolution];
+            var zMatrix = new double[numProfiles, resolution];
+
+            int idx = 0;
+            for (int p = 0; p < numProfiles; p++)
+            {
+                for (int i = 0; i < resolution; i++, idx++)
+                {
+                    xMatrix[p, i] = xResults[idx];
+                    zMatrix[p, i] = zResults[idx];
+                }
+            }
+
+            ErrorMessage = null;
+            return (xMatrix, zMatrix);
+        }
+        finally
+        {
+            // Stop transmission regardless of success/failure
+            CLLTI.TransferProfiles(Device, TTransferProfileType.NORMAL_CONTAINER_MODE, 0);
+
+            _batchBuffer   = null;
+            _batchSizeBytes = 0;
+        }
+    }
+
+    // --- Private implementation details ------------------------------------
+
+    private TScannerType _scannerType;
+
+    private readonly AutoResetEvent _batchEvent = new AutoResetEvent(false);
+    private byte[]? _batchBuffer;
+    private uint _batchSizeBytes;
+
+    private static readonly object _cbLock = new object();
+    private static readonly Dictionary<uint, LLTBatchEncoder> _instances = new();
+
+    // Single static delegate instance so GC doesn't collect it
+    private static readonly ProfileReceiveMethod _containerCbDelegate = ContainerCallbackStatic;
+
+    private static LLTBatchEncoder? GetInstance(uint userData)
+    {
+        lock (_cbLock)
+        {
+            _instances.TryGetValue(userData, out var inst);
+            return inst;
+        }
+    }
+
+    private void SetError(string context, int errorCode)
+    {
+        try
+        {
+            byte[] buf = new byte[256];
+            int ret = CLLTI.TranslateErrorValue(Device, errorCode, buf, buf.Length);
+            if (ret >= CLLTI.GENERAL_FUNCTION_OK)
+            {
+                string msg = Encoding.ASCII
+                    .GetString(buf, 0, buf.Length)
+                    .TrimEnd('\0', '\r', '\n');
+
+                ErrorMessage = $"{context}: {msg} (code {errorCode})";
+            }
+            else
+            {
+                ErrorMessage = $"{context}: error code {errorCode}";
+            }
+        }
+        catch
+        {
+            ErrorMessage = $"{context}: error code {errorCode}";
+        }
+    }
+
+    unsafe private static void ContainerCallbackStatic(byte* data, uint size, uint userData)
+    {
+        var inst = GetInstance(userData);
+        inst?.OnContainerCallback(data, size);
+    }
+
+    unsafe private void OnContainerCallback(byte* data, uint size)
+    {
+        if (size == 0 || _batchBuffer == null)
+            return;
+
+        int toCopy = (int)Math.Min(size, (uint)_batchBuffer.Length);
+
+        fixed (byte* dst = &_batchBuffer[0])
+        {
+            Buffer.MemoryCopy(source: data,
+                              destination: dst,
+                              destinationSizeInBytes: _batchBuffer.Length,
+                              sourceBytesToCopy: toCopy);
+        }
+
+        _batchSizeBytes = (uint)toCopy;
+        _batchEvent.Set(); // wake up AcquireBatchEncoder
     }
 }
