@@ -1,108 +1,181 @@
+using System.Windows.Input;
+using HelixToolkit.Wpf;
+using System.Windows.Media.Media3D;
+
+// in your MainWindow ctor after InitializeComponent():
+public MainWindow()
+{
+    InitializeComponent();
+    Viewport.MouseDown += Viewport_MouseDown;
+}
+
+private void Viewport_MouseDown(object sender, MouseButtonEventArgs e)
+{
+    var pos2D = e.GetPosition(Viewport.Viewport); // Viewport.Viewport is the underlying Viewport3D
+
+    // Find hits at this screen position
+    var hits = Viewport3DHelper.FindHits(Viewport.Viewport, pos2D);
+    if (hits == null || hits.Count == 0)
+        return;
+
+    // Take nearest hit
+    var hit = hits[0];
+    Point3D p = hit.Position;
+
+    // For example, show in a status label or MessageBox
+    // (replace CoordinatesLabel with your actual control)
+    CoordinatesLabel.Content = $"X={p.X:F3}, Y={p.Y:F3}, Z={p.Z:F3}";
+    // or
+    // MessageBox.Show($"X={p.X}, Y={p.Y}, Z={p.Z}");
+}
+
+--------
+
 using System;
 using System.Collections.Generic;
 using System.Windows.Media.Media3D;
 
-namespace LLT
+public static class PointCloudClustering3D
 {
-    public static class PointCloudDiff
+    /// <summary>
+    /// Runs a simple DBSCAN-style clustering on a Point3DCollection
+    /// and returns the largest cluster as a new Point3DCollection.
+    ///
+    /// eps  = neighborhood radius (same units as your points, e.g. mm)
+    /// minPts = minimum number of neighbors (including the point itself)
+    ///          to be considered a core point.
+    /// </summary>
+    public static Point3DCollection GetLargestDbscanCluster(
+        Point3DCollection points,
+        double eps,
+        int minPts)
     {
-        /// <summary>
-        /// Computes the "added" object point cloud: points that exist in
-        /// <paramref name="after"/> but not in <paramref name="before"/>.
-        /// 
-        /// Assumes both clouds are in the same coordinate system and aligned.
-        /// A point in "after" is considered background if there is at least one
-        /// point in "before" within <paramref name="matchRadius"/> distance.
-        /// All others are treated as part of the new object.
-        /// </summary>
-        /// <param name="before">Point cloud before placing the object.</param>
-        /// <param name="after">Point cloud after placing the object.</param>
-        /// <param name="matchRadius">
-        /// Distance tolerance (same units as your points, e.g. mm).
-        /// Typical: 0.02–0.10 depending on noise.
-        /// </param>
-        /// <returns>Point3DCollection representing the isolated new object.</returns>
-        public static Point3DCollection ExtractAddedObject(
-            Point3DCollection before,
-            Point3DCollection after,
-            double matchRadius)
+        if (points == null) throw new ArgumentNullException(nameof(points));
+        if (points.Count == 0) return new Point3DCollection();
+        if (eps <= 0) throw new ArgumentOutOfRangeException(nameof(eps));
+        if (minPts <= 0) throw new ArgumentOutOfRangeException(nameof(minPts));
+
+        int n = points.Count;
+        // 0 = unvisited, -1 = noise, >0 = cluster id
+        int[] labels = new int[n];
+        int clusterId = 0;
+        double eps2 = eps * eps;
+
+        var neighbors = new List<int>();
+
+        for (int i = 0; i < n; i++)
         {
-            if (before == null) throw new ArgumentNullException(nameof(before));
-            if (after == null) throw new ArgumentNullException(nameof(after));
-            if (matchRadius <= 0) throw new ArgumentOutOfRangeException(nameof(matchRadius));
+            if (labels[i] != 0)
+                continue; // already visited
 
-            // Use voxel size about the radius (slightly smaller to be safe)
-            double cellSize = matchRadius;
-            double radiusSq = matchRadius * matchRadius;
-
-            // Spatial hash: (ix, iy, iz) -> list of background points in that cell
-            var grid = new Dictionary<(int ix, int iy, int iz), List<Point3D>>();
-
-            foreach (var p in before)
+            GetNeighbors(points, i, eps2, neighbors);
+            if (neighbors.Count < minPts)
             {
-                var key = ToCell(p, cellSize);
-                if (!grid.TryGetValue(key, out var list))
-                {
-                    list = new List<Point3D>();
-                    grid[key] = list;
-                }
-                list.Add(p);
+                labels[i] = -1; // noise
+                continue;
             }
 
-            var result = new Point3DCollection(after.Count);
-
-            foreach (var q in after)
-            {
-                var qCell = ToCell(q, cellSize);
-                bool hasMatch = false;
-
-                // Check this cell and all 26 neighbors
-                for (int dx = -1; dx <= 1 && !hasMatch; dx++)
-                {
-                    for (int dy = -1; dy <= 1 && !hasMatch; dy++)
-                    {
-                        for (int dz = -1; dz <= 1 && !hasMatch; dz++)
-                        {
-                            var neighborKey = (qCell.ix + dx, qCell.iy + dy, qCell.iz + dz);
-                            if (!grid.TryGetValue(neighborKey, out var list))
-                                continue;
-
-                            foreach (var p in list)
-                            {
-                                double dxp = p.X - q.X;
-                                double dyp = p.Y - q.Y;
-                                double dzp = p.Z - q.Z;
-                                double distSq = dxp * dxp + dyp * dyp + dzp * dzp;
-
-                                if (distSq <= radiusSq)
-                                {
-                                    hasMatch = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // If no close neighbor in "before", treat it as new object point
-                if (!hasMatch)
-                {
-                    result.Add(q);
-                }
-            }
-
-            return result;
+            clusterId++;
+            ExpandCluster(points, i, neighbors, clusterId, eps2, minPts, labels);
         }
 
-        /// <summary>
-        /// Maps a 3D point into integer voxel coordinates.
-        /// </summary>
-        private static (int ix, int iy, int iz) ToCell(Point3D p, double cellSize)
+        if (clusterId == 0)
+            return new Point3DCollection(); // nothing clustered
+
+        // Count sizes per clusterId
+        var clusterCounts = new int[clusterId + 1];
+        for (int i = 0; i < n; i++)
         {
-            int ix = (int)Math.Floor(p.X / cellSize);
-            int iy = (int)Math.Floor(p.Y / cellSize);
-            int iz = (int)Math.Floor(p.Z / cellSize);
-            return (ix, iy, iz);
+            int id = labels[i];
+            if (id > 0) clusterCounts[id]++;
+        }
+
+        // Find largest cluster id
+        int bestId = 1;
+        int bestCount = clusterCounts[1];
+        for (int id = 2; id <= clusterId; id++)
+        {
+            if (clusterCounts[id] > bestCount)
+            {
+                bestCount = clusterCounts[id];
+                bestId = id;
+            }
+        }
+
+        // Collect points for largest cluster
+        var result = new Point3DCollection(bestCount);
+        for (int i = 0; i < n; i++)
+        {
+            if (labels[i] == bestId)
+                result.Add(points[i]);
+        }
+
+        return result;
+    }
+
+    private static void GetNeighbors(
+        Point3DCollection points,
+        int index,
+        double eps2,
+        List<int> neighbors)
+    {
+        neighbors.Clear();
+        var p = points[index];
+
+        for (int j = 0; j < points.Count; j++)
+        {
+            var q = points[j];
+            double dx = p.X - q.X;
+            double dy = p.Y - q.Y;
+            double dz = p.Z - q.Z;
+            double dist2 = dx * dx + dy * dy + dz * dz;
+
+            if (dist2 <= eps2)
+                neighbors.Add(j);
+        }
+    }
+
+    private static void ExpandCluster(
+        Point3DCollection points,
+        int seedIndex,
+        List<int> neighbors,
+        int clusterId,
+        double eps2,
+        int minPts,
+        int[] labels)
+    {
+        labels[seedIndex] = clusterId;
+
+        int i = 0;
+        while (i < neighbors.Count)
+        {
+            int idx = neighbors[i];
+
+            if (labels[idx] == -1)
+            {
+                // previously marked noise -> border point
+                labels[idx] = clusterId;
+            }
+
+            if (labels[idx] == 0)
+            {
+                labels[idx] = clusterId;
+
+                var neighbors2 = new List<int>();
+                GetNeighbors(points, idx, eps2, neighbors2);
+
+                if (neighbors2.Count >= minPts)
+                {
+                    // merge neighbors2 into neighbors (simple dedupe)
+                    foreach (var nb in neighbors2)
+                    {
+                        if (!neighbors.Contains(nb))
+                            neighbors.Add(nb);
+                    }
+                }
+            }
+
+            i++;
         }
     }
 }
