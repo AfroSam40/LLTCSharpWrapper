@@ -546,3 +546,70 @@ namespace LLT
         }
     }
 }
+
+using System;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
+
+public static class NameGenerator
+{
+    /// <summary>
+    /// Generates a unique name in the given folder based on a timestamp.
+    /// Format: yyyyMMdd_HHmmss (e.g. 20251213_104530)
+    ///
+    /// If a file/folder with that base name already exists, it appends:
+    ///   _N
+    /// where N = (count of existing instances with that base) + 1
+    ///
+    /// Examples (existing in folder):
+    ///   20251213_104530
+    ///   20251213_104530_2
+    /// New name => 20251213_104530_3
+    ///
+    /// This checks both files and directories.
+    /// </summary>
+    /// <param name="folderPath">Folder to search in.</param>
+    /// <param name="timestamp">
+    /// Optional timestamp to use; if null, DateTime.Now is used.
+    /// </param>
+    /// <returns>Unique name (no extension) based on date and time down to seconds.</returns>
+    public static string GenerateUniqueTimestampName(string folderPath, DateTime? timestamp = null)
+    {
+        if (string.IsNullOrWhiteSpace(folderPath))
+            throw new ArgumentException("folderPath is null or empty.", nameof(folderPath));
+
+        if (!Directory.Exists(folderPath))
+            throw new DirectoryNotFoundException($"Folder does not exist: {folderPath}");
+
+        var dt = timestamp ?? DateTime.Now;
+        var baseName = dt.ToString("yyyyMMdd_HHmmss"); // e.g. 20251213_104530
+
+        // Get all names (files + directories) in the folder, without extensions.
+        var existingNames = Directory.EnumerateFileSystemEntries(folderPath)
+                                     .Select(p => Path.GetFileNameWithoutExtension(p))
+                                     .ToList();
+
+        // Regex to match:
+        //  "baseName"
+        //  "baseName_2"
+        //  "baseName_15"
+        var pattern = $"^{Regex.Escape(baseName)}(?:_(\\d+))?$";
+        var regex = new Regex(pattern, RegexOptions.Compiled);
+
+        // Find all that match this base name (with or without numeric suffix)
+        var matches = existingNames
+            .Select(name => regex.Match(name))
+            .Where(m => m.Success)
+            .ToList();
+
+        // If none exist, just return baseName
+        if (matches.Count == 0)
+            return baseName;
+
+        // Otherwise, count how many exist and return baseName_(count+1)
+        int instanceCount = matches.Count;
+        string uniqueName = $"{baseName}_{instanceCount + 1}";
+        return uniqueName;
+    }
+}
