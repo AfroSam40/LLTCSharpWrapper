@@ -622,22 +622,29 @@ public static class NameGenerator
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Windows;
 using System.Windows.Media.Media3D;
+using Microsoft.Win32;
 
 namespace LLT
 {
     public static class PointCloudBinaryIO
     {
-        /// <summary>
-        /// Save a Point3DCollection to a binary file.
-        /// Format:
-        ///   int Count
-        ///   then Count * (double X, double Y, double Z)
-        /// </summary>
+        // ---------- Internal helper to ensure an extension ----------
+        private static string EnsureExtension(string filePath, string defaultExt)
+        {
+            if (string.IsNullOrWhiteSpace(Path.GetExtension(filePath)))
+                return filePath + defaultExt;
+            return filePath;
+        }
+
+        // ---------- POINT CLOUD: SAVE / LOAD BY PATH ----------
+
         public static void SavePointCloud(string filePath, Point3DCollection points)
         {
-            if (points == null)
-                throw new ArgumentNullException(nameof(points));
+            if (points == null) throw new ArgumentNullException(nameof(points));
+
+            filePath = EnsureExtension(filePath, ".pcd");
 
             using (var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None))
             using (var bw = new BinaryWriter(fs))
@@ -652,17 +659,17 @@ namespace LLT
             }
         }
 
-        /// <summary>
-        /// Load a Point3DCollection from a binary file saved by SavePointCloud.
-        /// </summary>
         public static Point3DCollection LoadPointCloud(string filePath)
         {
-            var points = new Point3DCollection();
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentNullException(nameof(filePath));
 
             using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
             using (var br = new BinaryReader(fs))
             {
                 int count = br.ReadInt32();
+                var points = new Point3DCollection(count);
+
                 for (int i = 0; i < count; i++)
                 {
                     double x = br.ReadDouble();
@@ -670,34 +677,32 @@ namespace LLT
                     double z = br.ReadDouble();
                     points.Add(new Point3D(x, y, z));
                 }
-            }
 
-            return points;
+                return points;
+            }
         }
 
-        /// <summary>
-        /// Save a List&lt;Profile&gt; to a binary file.
-        /// Format:
-        ///   int ProfileCount
-        ///   for each profile:
-        ///       int PointCount
-        ///       then PointCount * (double X, double Z)
-        /// </summary>
+        // ---------- PROFILES: SAVE / LOAD BY PATH ----------
+
         public static void SaveProfiles(string filePath, List<Profile> profiles)
         {
-            if (profiles == null)
-                throw new ArgumentNullException(nameof(profiles));
+            if (profiles == null) throw new ArgumentNullException(nameof(profiles));
+
+            filePath = EnsureExtension(filePath, ".profbin");
 
             using (var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None))
             using (var bw = new BinaryWriter(fs))
             {
+                // Number of profiles
                 bw.Write(profiles.Count);
 
                 foreach (var profile in profiles)
                 {
                     var pts = profile.ToArray();
+                    // Number of points in this profile
                     bw.Write(pts.Length);
 
+                    // X, Z for each point
                     foreach (var p in pts)
                     {
                         bw.Write(p.X);
@@ -707,17 +712,16 @@ namespace LLT
             }
         }
 
-        /// <summary>
-        /// Load a List&lt;Profile&gt; from a binary file saved by SaveProfiles.
-        /// </summary>
         public static List<Profile> LoadProfiles(string filePath)
         {
-            var profiles = new List<Profile>();
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentNullException(nameof(filePath));
 
             using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
             using (var br = new BinaryReader(fs))
             {
                 int profileCount = br.ReadInt32();
+                var profiles = new List<Profile>(profileCount);
 
                 for (int p = 0; p < profileCount; p++)
                 {
@@ -728,19 +732,82 @@ namespace LLT
                     {
                         double x = br.ReadDouble();
                         double z = br.ReadDouble();
-
-                        points.Add(new ScanPoint
-                        {
-                            X = x,
-                            Z = z
-                        });
+                        points.Add(new ScanPoint { X = x, Z = z });
                     }
 
                     profiles.Add(new Profile(points));
                 }
-            }
 
-            return profiles;
+                return profiles;
+            }
+        }
+
+        // ---------- OPENFILEDIALOG HELPERS ----------
+
+        /// <summary>
+        /// Shows an OpenFileDialog and loads a point cloud from the selected file.
+        /// Returns null if the user cancels.
+        /// </summary>
+        public static Point3DCollection? LoadPointCloudFromDialog(Window? owner = null)
+        {
+            var dlg = new OpenFileDialog
+            {
+                Title = "Open Point Cloud",
+                Filter = "Point Cloud (*.pcd)|*.pcd|All files (*.*)|*.*",
+                CheckFileExists = true,
+                Multiselect = false
+            };
+
+            bool? result = owner == null ? dlg.ShowDialog() : dlg.ShowDialog(owner);
+            if (result != true)
+                return null;
+
+            try
+            {
+                return LoadPointCloud(dlg.FileName);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(owner ?? Application.Current.MainWindow,
+                    "Failed to load point cloud:\n" + ex.Message,
+                    "Error",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Shows an OpenFileDialog and loads profiles from the selected file.
+        /// Returns null if the user cancels.
+        /// </summary>
+        public static List<Profile>? LoadProfilesFromDialog(Window? owner = null)
+        {
+            var dlg = new OpenFileDialog
+            {
+                Title = "Open Profiles",
+                Filter = "Profile Binary (*.profbin)|*.profbin|All files (*.*)|*.*",
+                CheckFileExists = true,
+                Multiselect = false
+            };
+
+            bool? result = owner == null ? dlg.ShowDialog() : dlg.ShowDialog(owner);
+            if (result != true)
+                return null;
+
+            try
+            {
+                return LoadProfiles(dlg.FileName);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(owner ?? Application.Current.MainWindow,
+                    "Failed to load profiles:\n" + ex.Message,
+                    "Error",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+                return null;
+            }
         }
     }
 }
