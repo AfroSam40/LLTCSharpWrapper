@@ -1,64 +1,126 @@
-using HelixToolkit.Wpf;
-using System.Windows.Media.Media3D;
-
-public static class CameraHelpers
+public static double EstimateBlobVolumeBySlices(
+    Point3DCollection points,
+    PlaneFitResult basePlane,
+    double sliceThickness,
+    out List<BlobSlice> slices,
+    int minPointsPerSlice = 50)
 {
-    /// <summary>
-    /// Rotate the Helix viewport so you see the plane "edge on" (side view).
-    /// Camera looks along a direction lying in the plane; Up is the plane normal.
-    /// </summary>
-    /// <param name="viewport">Helix viewport.</param>
-    /// <param name="plane">Fitted plane (uses Centroid and Normal).</param>
-    /// <param name="distance">Camera distance from plane centroid.</param>
-    /// <param name="useFirstAxis">
-    /// If true use one in-plane axis, if false use the orthogonal in-plane axis
-    /// (lets you flip which side you view from).
-    /// </param>
-    public static void LookSideOnToPlane(
-        HelixViewport3D viewport,
-        PlaneFitResult plane,
-        double distance = 50.0,
-        bool useFirstAxis = true)
+    slices = new List<BlobSlice>();
+    if (points == null || points.Count == 0) return 0.0;
+    if (sliceThickness <= 0) throw new ArgumentOutOfRangeException(nameof(sliceThickness));
+
+    // ---- 1. Build orthonormal basis (u, v, n) ----
+    Vector3D n = basePlane.Normal;
+    if (n.LengthSquared < 1e-12) return 0.0;
+
+    // Force normal to point "up" in +Z (helps make h > 0 mean "above the plane").
+    if (Vector3D.DotProduct(n, new Vector3D(0, 0, 1)) < 0)
     {
-        if (viewport?.Camera is not ProjectionCamera cam)
-            return;
-
-        Vector3D n = plane.Normal;
-        if (n.LengthSquared < 1e-12)
-            return;
-        n.Normalize();
-
-        // Pick a "world up" that is not parallel to the normal
-        Vector3D worldUp = new Vector3D(0, 0, 1);
-        if (Math.Abs(Vector3D.DotProduct(n, worldUp)) > 0.9)
-            worldUp = new Vector3D(0, 1, 0);
-
-        // Build an orthonormal basis {u, v, n} where u, v lie in the plane
-        // u is in plane, roughly horizontal (n × worldUp)
-        Vector3D u = Vector3D.CrossProduct(n, worldUp);
-        if (u.LengthSquared < 1e-12)
-            u = new Vector3D(1, 0, 0);
-        u.Normalize();
-
-        // v is the other in-plane axis (n × u)
-        Vector3D v = Vector3D.CrossProduct(n, u);
-        if (v.LengthSquared < 1e-12)
-            v = new Vector3D(0, 1, 0);
-        v.Normalize();
-
-        // Choose which in-plane axis to look along (this is the "side" direction)
-        Vector3D sideDir = useFirstAxis ? u : v;
-
-        // We want LookDirection to point FROM camera TO plane centroid.
-        // So camera position = centroid - sideDir * distance
-        Point3D target = plane.Centroid;
-        Point3D position = target - sideDir * distance;
-
-        cam.Position = position;
-        cam.LookDirection = target - position; // towards the plane, along sideDir
-        cam.UpDirection = n;                   // plane normal is "up" in the view
-
-        // Do NOT call ZoomExtents() here, that would overwrite our orientation.
-        viewport.Camera = cam;
+        n = -n;
+        basePlane.Normal = n;
     }
+    n.Normalize();
+
+    // Choose a vector not parallel to n for constructing u
+    Vector3D temp = Math.Abs(n.Z) < 0.9
+        ? new Vector3D(0, 0, 1)
+        : new Vector3D(0, 1, 0);
+
+    Vector3D u = Vector3D.CrossProduct(temp, n);
+    if (u.LengthSquared < 1e-12)
+        u = new Vector3D(1, 0, 0);
+    u.Normalize();
+
+    Vector3D v = Vector3D.CrossProduct(n, u);
+    v.Normalize();
+
+    Point3D origin = basePlane.Centroid;
+
+    // ---- 2. Transform points into local (u, v, n) coords; keep only above plane ----
+    var localPoints = new List<(double U, double V, double H)>(points.Count);
+
+    foreach (var p in points)
+    {
+        Vector3D d = p - origin;
+
+        double h  = Vector3D.DotProduct(d, n); // height above plane
+        if (h <= 0.0)       // <-- Only keep blob side
+            continue;
+
+        double uu = Vector3D.DotProduct(d, u); // in-plane coord
+        double vv = Vector3D.DotProduct(d, v);
+
+        localPoints.Add((uu, vv, h));
+    }
+
+    if (localPoints.Count == 0)
+        return 0.0;
+
+    // ---- 3. Determine height range and slice grid ----
+    double minH = localPoints.Min(p => p.H);
+    double maxH = localPoints.Max(p => p.H);
+
+    // Ensure we start at ~0 (just above plane) for sanity
+    if (minH < 0) minH = 0;
+
+    int sliceCount = (int)Math.Ceiling((maxH - minH) / sliceThickness);
+    if (sliceCount <= 0) return 0.0;
+
+    double totalVolume = 0.0;
+
+    // ---- 4. Slice loop ----
+    for (int i = 0; i < sliceCount; i++)
+    {
+        double h0 = minH + i * sliceThickness;
+        double h1 = h0 + sliceThickness;
+        double hCenter = 0.5 * (h0 + h1);
+
+        // Points belonging to this slice
+        var slicePoints = localPoints
+            .Where(p => p.H >= h0 && p.H < h1)
+            .ToList();
+
+        if (slicePoints.Count < minPointsPerSlice)
+            continue;
+
+        // Compute centroid in local (u,v) for this slice
+        double cx = slicePoints.Average(p => p.U);
+        double cy = slicePoints.Average(p => p.V);
+
+        // Compute RMS radius around that centroid
+        double avgR2 = slicePoints.Average(p =>
+        {
+            double du = p.U - cx;
+            double dv = p.V - cy;
+            return du * du + dv * dv;
+        });
+
+        double radius = Math.Sqrt(avgR2);
+        if (radius <= 0) continue;
+
+        double area = Math.PI * radius * radius;
+        double volumeSlice = area * sliceThickness;
+        totalVolume += volumeSlice;
+
+        // World-space center of this slice
+        Point3D centerWorld =
+            origin +
+            n * hCenter +
+            u * cx +
+            v * cy;
+
+        slices.Add(new BlobSlice
+        {
+            H0          = h0,
+            H1          = h1,
+            HCenter     = hCenter,
+            CenterWorld = centerWorld,
+            Normal      = n,
+            Radius      = radius,
+            Area        = area,
+            PointCount  = slicePoints.Count
+        });
+    }
+
+    return totalVolume;
 }
