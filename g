@@ -19,7 +19,7 @@ public static double EstimateBlobVolumeBySlicesUsingHull(
 
     n.Normalize();
 
-    // Flip n if most points are "below" it (we want blob points => positive h)
+    // Flip n so that most points lie at positive height
     double signSum = 0.0;
     foreach (var p in points)
     {
@@ -31,7 +31,7 @@ public static double EstimateBlobVolumeBySlicesUsingHull(
     if (signSum < 0.0)
         n = -n;
 
-    // Build u, v orthogonal to n
+    // Build tangential basis u, v
     Vector3D temp = Math.Abs(n.Z) < 0.9
         ? new Vector3D(0, 0, 1)
         : new Vector3D(1, 0, 0);
@@ -46,8 +46,9 @@ public static double EstimateBlobVolumeBySlicesUsingHull(
 
     Point3D origin = basePlane.Centroid;
 
-    // ---------- 2. Transform all points into local (U, V, H) ----------
+    // ---------- 2. Transform all points to local (U, V, H) ----------
     var local = new List<(double U, double V, double H)>(points.Count);
+    double sumUAll = 0.0, sumVAll = 0.0;
 
     foreach (var p in points)
     {
@@ -55,26 +56,31 @@ public static double EstimateBlobVolumeBySlicesUsingHull(
         double h = Vector3D.DotProduct(d, n); // height above plane
 
         if (h < -1e-6)
-            continue; // clearly below plane (noise / wrong side)
+            continue; // clearly below plane (ignore)
 
         double uu = Vector3D.DotProduct(d, u);
         double vv = Vector3D.DotProduct(d, v);
 
         local.Add((uu, vv, h));
+        sumUAll += uu;
+        sumVAll += vv;
     }
 
     if (local.Count == 0)
         return 0.0;
 
+    // Global in-plane centroid for the whole blob
+    double globalU = sumUAll / local.Count;
+    double globalV = sumVAll / local.Count;
+
     double minH = local.Min(t => t.H);
     double maxH = local.Max(t => t.H);
-    if (minH < 0) minH = 0; // clamp near-plane noise
+    if (minH < 0) minH = 0;
 
     int sliceCount = (int)Math.Ceiling((maxH - minH) / sliceThickness);
     if (sliceCount <= 0)
         return 0.0;
 
-    // Keep full (U,V,H) per slice so we can compute centroid properly
     var sliceBuckets = new List<List<(double U, double V, double H)>>(sliceCount);
     for (int i = 0; i < sliceCount; i++)
         sliceBuckets.Add(new List<(double U, double V, double H)>());
@@ -84,11 +90,10 @@ public static double EstimateBlobVolumeBySlicesUsingHull(
         int idx = (int)((H - minH) / sliceThickness);
         if (idx < 0) idx = 0;
         if (idx >= sliceCount) idx = sliceCount - 1;
-
         sliceBuckets[idx].Add((U, V, H));
     }
 
-    // ---------- 3. Per-slice convex hull area -> volume + correct world centers ----------
+    // ---------- 3. Slice hull area, global center for visualization ----------
     double totalVolume = 0.0;
 
     for (int i = 0; i < sliceCount; i++)
@@ -97,43 +102,37 @@ public static double EstimateBlobVolumeBySlicesUsingHull(
         if (bucket.Count < minPointsPerSlice)
             continue;
 
-        // 2D points for hull
+        // 2D points for convex hull (area only)
         var pts2D = new List<Point>(bucket.Count);
-        double sumU = 0.0, sumV = 0.0;
         foreach (var (U, V, _) in bucket)
-        {
             pts2D.Add(new Point(U, V));
-            sumU += U;
-            sumV += V;
-        }
 
         double area = ComputeConvexHullArea(pts2D);
         if (area <= 0)
             continue;
 
-        double meanU = sumU / bucket.Count;
-        double meanV = sumV / bucket.Count;
-
         double h0 = minH + i * sliceThickness;
         double h1 = h0 + sliceThickness;
         double hCenter = 0.5 * (h0 + h1);
 
-        // Center in world space (plane origin + in-plane offset + height * normal)
+        // Center for visualization uses GLOBAL (U,V),
+        // so slices stack nicely along a single axis
         Point3D centerWorld =
             origin +
-            u * meanU +
-            v * meanV +
+            u * globalU +
+            v * globalV +
             n * hCenter;
 
-        double radius = Math.Sqrt(area / Math.PI); // for circle-approx visuals
+        double radius = Math.Sqrt(area / Math.PI);
 
         slices.Add(new BlobSlice
         {
             H0 = h0,
             H1 = h1,
             HCenter = hCenter,
-            UCenter = meanU,
-            VCenter = meanV,
+            // store both for debugging
+            UCenter = globalU,
+            VCenter = globalV,
             CenterWorld = centerWorld,
             Normal = n,
             Radius = radius,
