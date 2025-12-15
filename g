@@ -1,181 +1,355 @@
-using System.Windows.Input;
-using HelixToolkit.Wpf;
-using System.Windows.Media.Media3D;
-
-// in your MainWindow ctor after InitializeComponent():
-public MainWindow()
-{
-    InitializeComponent();
-    Viewport.MouseDown += Viewport_MouseDown;
-}
-
-private void Viewport_MouseDown(object sender, MouseButtonEventArgs e)
-{
-    var pos2D = e.GetPosition(Viewport.Viewport); // Viewport.Viewport is the underlying Viewport3D
-
-    // Find hits at this screen position
-    var hits = Viewport3DHelper.FindHits(Viewport.Viewport, pos2D);
-    if (hits == null || hits.Count == 0)
-        return;
-
-    // Take nearest hit
-    var hit = hits[0];
-    Point3D p = hit.Position;
-
-    // For example, show in a status label or MessageBox
-    // (replace CoordinatesLabel with your actual control)
-    CoordinatesLabel.Content = $"X={p.X:F3}, Y={p.Y:F3}, Z={p.Z:F3}";
-    // or
-    // MessageBox.Show($"X={p.X}, Y={p.Y}, Z={p.Z}");
-}
-
---------
-
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Windows.Media.Media3D;
 
-public static class PointCloudClustering3D
+namespace PointCloudUtils
 {
     /// <summary>
-    /// Runs a simple DBSCAN-style clustering on a Point3DCollection
-    /// and returns the largest cluster as a new Point3DCollection.
-    ///
-    /// eps  = neighborhood radius (same units as your points, e.g. mm)
-    /// minPts = minimum number of neighbors (including the point itself)
-    ///          to be considered a core point.
+    /// Result of fitting a (roughly horizontal) plane z = a*x + b*y + c.
     /// </summary>
-    public static Point3DCollection GetLargestDbscanCluster(
-        Point3DCollection points,
-        double eps,
-        int minPts)
+    public class PlaneFitResult
     {
-        if (points == null) throw new ArgumentNullException(nameof(points));
-        if (points.Count == 0) return new Point3DCollection();
-        if (eps <= 0) throw new ArgumentOutOfRangeException(nameof(eps));
-        if (minPts <= 0) throw new ArgumentOutOfRangeException(nameof(minPts));
+        /// <summary>
+        /// Plane coefficients: z = A * x + B * y + C
+        /// </summary>
+        public double A { get; set; }
+        public double B { get; set; }
+        public double C { get; set; }
 
-        int n = points.Count;
-        // 0 = unvisited, -1 = noise, >0 = cluster id
-        int[] labels = new int[n];
-        int clusterId = 0;
-        double eps2 = eps * eps;
+        /// <summary>
+        /// Plane normal (normalized).
+        /// </summary>
+        public Vector3D Normal { get; set; }
 
-        var neighbors = new List<int>();
+        /// <summary>
+        /// Centroid of the inlier points used for the fit.
+        /// </summary>
+        public Point3D Centroid { get; set; }
 
-        for (int i = 0; i < n; i++)
-        {
-            if (labels[i] != 0)
-                continue; // already visited
+        /// <summary>
+        /// Average absolute distance (in Z) from points to plane.
+        /// </summary>
+        public double AverageError { get; set; }
 
-            GetNeighbors(points, i, eps2, neighbors);
-            if (neighbors.Count < minPts)
-            {
-                labels[i] = -1; // noise
-                continue;
-            }
-
-            clusterId++;
-            ExpandCluster(points, i, neighbors, clusterId, eps2, minPts, labels);
-        }
-
-        if (clusterId == 0)
-            return new Point3DCollection(); // nothing clustered
-
-        // Count sizes per clusterId
-        var clusterCounts = new int[clusterId + 1];
-        for (int i = 0; i < n; i++)
-        {
-            int id = labels[i];
-            if (id > 0) clusterCounts[id]++;
-        }
-
-        // Find largest cluster id
-        int bestId = 1;
-        int bestCount = clusterCounts[1];
-        for (int id = 2; id <= clusterId; id++)
-        {
-            if (clusterCounts[id] > bestCount)
-            {
-                bestCount = clusterCounts[id];
-                bestId = id;
-            }
-        }
-
-        // Collect points for largest cluster
-        var result = new Point3DCollection(bestCount);
-        for (int i = 0; i < n; i++)
-        {
-            if (labels[i] == bestId)
-                result.Add(points[i]);
-        }
-
-        return result;
+        /// <summary>
+        /// The points that belong to this plane (height band).
+        /// </summary>
+        public List<Point3D> InlierPoints { get; set; } = new List<Point3D>();
     }
 
-    private static void GetNeighbors(
-        Point3DCollection points,
-        int index,
-        double eps2,
-        List<int> neighbors)
+    public static class PointCloudPlaneFitting
     {
-        neighbors.Clear();
-        var p = points[index];
-
-        for (int j = 0; j < points.Count; j++)
+        /// <summary>
+        /// Finds multiple best-fit (roughly horizontal) planes in a point cloud.
+        /// It groups points by height (Z) into bands of thickness bandThickness,
+        /// then fits z = a*x + b*y + c to each band via least squares.
+        /// 
+        /// Assumes surfaces are mostly parallel to the XY plane.
+        /// </summary>
+        /// <param name="points">Input point cloud.</param>
+        /// <param name="bandThickness">
+        /// Max Z-span per band (e.g. 0.05 for 0.05 mm if your units are mm).
+        /// Points whose Z differs by more than this will go into different planes.
+        /// </param>
+        /// <param name="minPointsPerPlane">Minimum number of points required to fit a plane.</param>
+        /// <returns>List of plane fit results (one per detected height band).</returns>
+        public static List<PlaneFitResult> FitHorizontalPlanesByHeight(
+            Point3DCollection points,
+            double bandThickness,
+            int minPointsPerPlane = 100)
         {
-            var q = points[j];
-            double dx = p.X - q.X;
-            double dy = p.Y - q.Y;
-            double dz = p.Z - q.Z;
-            double dist2 = dx * dx + dy * dy + dz * dz;
+            var results = new List<PlaneFitResult>();
+            if (points == null || points.Count == 0)
+                return results;
 
-            if (dist2 <= eps2)
-                neighbors.Add(j);
-        }
-    }
+            // 1. Sort points by Z
+            var sorted = points.OrderBy(p => p.Z).ToList();
 
-    private static void ExpandCluster(
-        Point3DCollection points,
-        int seedIndex,
-        List<int> neighbors,
-        int clusterId,
-        double eps2,
-        int minPts,
-        int[] labels)
-    {
-        labels[seedIndex] = clusterId;
+            // 2. Group into bands along Z
+            var currentBand = new List<Point3D>();
+            double currentBandStartZ = sorted[0].Z;
 
-        int i = 0;
-        while (i < neighbors.Count)
-        {
-            int idx = neighbors[i];
-
-            if (labels[idx] == -1)
+            foreach (var p in sorted)
             {
-                // previously marked noise -> border point
-                labels[idx] = clusterId;
-            }
-
-            if (labels[idx] == 0)
-            {
-                labels[idx] = clusterId;
-
-                var neighbors2 = new List<int>();
-                GetNeighbors(points, idx, eps2, neighbors2);
-
-                if (neighbors2.Count >= minPts)
+                if (currentBand.Count == 0)
                 {
-                    // merge neighbors2 into neighbors (simple dedupe)
-                    foreach (var nb in neighbors2)
+                    currentBand.Add(p);
+                    currentBandStartZ = p.Z;
+                    continue;
+                }
+
+                // If this point is still within the Z band, keep adding
+                if (Math.Abs(p.Z - currentBandStartZ) <= bandThickness)
+                {
+                    currentBand.Add(p);
+                }
+                else
+                {
+                    // Finish current band
+                    if (currentBand.Count >= minPointsPerPlane)
                     {
-                        if (!neighbors.Contains(nb))
-                            neighbors.Add(nb);
+                        var plane = FitHorizontalPlane(currentBand);
+                        if (plane != null)
+                            results.Add(plane);
                     }
+
+                    // Start new band
+                    currentBand = new List<Point3D> { p };
+                    currentBandStartZ = p.Z;
                 }
             }
 
-            i++;
+            // Last band
+            if (currentBand.Count >= minPointsPerPlane)
+            {
+                var plane = FitHorizontalPlane(currentBand);
+                if (plane != null)
+                    results.Add(plane);
+            }
+
+            return results;
+        }
+
+        /// <summary>
+        /// Fits a single plane z = a*x + b*y + c (least squares)
+        /// to the given (roughly horizontal) surface points.
+        /// Returns null if the system is degenerate.
+        /// </summary>
+        private static PlaneFitResult? FitHorizontalPlane(List<Point3D> pts)
+        {
+            int n = pts.Count;
+            if (n < 3)
+                return null;
+
+            // Accumulate sums for normal equations
+            double sumX = 0, sumY = 0, sumZ = 0;
+            double sumX2 = 0, sumY2 = 0, sumXY = 0;
+            double sumXZ = 0, sumYZ = 0;
+
+            foreach (var p in pts)
+            {
+                double x = p.X;
+                double y = p.Y;
+                double z = p.Z;
+
+                sumX  += x;
+                sumY  += y;
+                sumZ  += z;
+                sumX2 += x * x;
+                sumY2 += y * y;
+                sumXY += x * y;
+                sumXZ += x * z;
+                sumYZ += y * z;
+            }
+
+            // Normal equation matrix A and RHS b for z = a*x + b*y + c:
+            // [ sumX2  sumXY  sumX ] [a] = [ sumXZ ]
+            // [ sumXY  sumY2  sumY ] [b]   [ sumYZ ]
+            // [ sumX   sumY   n    ] [c]   [ sumZ  ]
+            double a11 = sumX2, a12 = sumXY, a13 = sumX;
+            double a21 = sumXY, a22 = sumY2, a23 = sumY;
+            double a31 = sumX,  a32 = sumY,  a33 = n;
+
+            double b1 = sumXZ, b2 = sumYZ, b3 = sumZ;
+
+            // Solve via Cramer's rule (3x3)
+            double detA = 
+                a11 * (a22 * a33 - a23 * a32) -
+                a12 * (a21 * a33 - a23 * a31) +
+                a13 * (a21 * a32 - a22 * a31);
+
+            if (Math.Abs(detA) < 1e-12)
+            {
+                // Degenerate system – points may be collinear or too noisy
+                return null;
+            }
+
+            // Determinants for a, b, c
+            double detA1 =
+                b1  * (a22 * a33 - a23 * a32) -
+                a12 * (b2  * a33 - a23 * b3 ) +
+                a13 * (b2  * a32 - a22 * b3 );
+
+            double detA2 =
+                a11 * (b2  * a33 - a23 * b3 ) -
+                b1  * (a21 * a33 - a23 * a31) +
+                a13 * (a21 * b3  - b2  * a31);
+
+            double detA3 =
+                a11 * (a22 * b3  - b2  * a32) -
+                a12 * (a21 * b3  - b2  * a31) +
+                b1  * (a21 * a32 - a22 * a31);
+
+            double A = detA1 / detA;
+            double B = detA2 / detA;
+            double C = detA3 / detA;
+
+            // Normal of plane z - A*x - B*y - C = 0 is (A, B, -1)
+            Vector3D normal = new Vector3D(A, B, -1.0);
+            if (normal.Length > 0)
+                normal.Normalize();
+
+            // Centroid
+            var centroid = new Point3D(sumX / n, sumY / n, sumZ / n);
+
+            // Average absolute error in Z
+            double errSum = 0;
+            foreach (var p in pts)
+            {
+                double zFit = A * p.X + B * p.Y + C;
+                errSum += Math.Abs(p.Z - zFit);
+            }
+            double avgErr = errSum / n;
+
+            return new PlaneFitResult
+            {
+                A = A,
+                B = B,
+                C = C,
+                Normal = normal,
+                Centroid = centroid,
+                AverageError = avgErr,
+                InlierPoints = new List<Point3D>(pts)
+            };
         }
     }
+}
+
+
+----
+
+<helix:HelixViewport3D x:Name="Viewport">
+    <helix:DefaultLights />
+
+    <!-- Existing stuff -->
+    <ModelVisual3D x:Name="MeshModel" />
+    <helix:PointsVisual3D x:Name="PointCloudPoints"
+                          Color="Red"
+                          Size="1" />
+    
+    <!-- New: container for fitted planes -->
+    <ModelVisual3D x:Name="PlanesModel" />
+</helix:HelixViewport3D>
+
+
+------
+
+using HelixToolkit.Wpf;
+using System.Windows.Media;
+using System.Windows.Media.Media3D;
+using System.Collections.Generic;
+
+public static class PlaneVisualHelper
+{
+    /// <summary>
+    /// Create a rectangular mesh that lies on the fitted plane and spans the
+    /// inlier points' bounding box (with a padding factor).
+    /// </summary>
+    public static GeometryModel3D CreatePlaneGeometry(
+        PlaneFitResult plane,
+        double paddingFactor = 1.2)
+    {
+        if (plane.InlierPoints == null || plane.InlierPoints.Count < 3)
+            return null;
+
+        var centroid = plane.Centroid;
+        var n = plane.Normal;
+        if (n.LengthSquared < 1e-12)
+            return null;
+
+        // Choose an "up" vector that is not parallel to the normal
+        Vector3D up = (Math.Abs(n.Z) < 0.9)
+            ? new Vector3D(0, 0, 1)
+            : new Vector3D(0, 1, 0);
+
+        // Build orthonormal basis (u, v) in the plane
+        Vector3D u = Vector3D.CrossProduct(n, up);
+        if (u.LengthSquared < 1e-12)
+            return null;
+        u.Normalize();
+
+        Vector3D v = Vector3D.CrossProduct(n, u);
+        v.Normalize();
+
+        // Project inlier points onto (u, v) axes to get 2D bounds
+        double minU = double.MaxValue, maxU = double.MinValue;
+        double minV = double.MaxValue, maxV = double.MinValue;
+
+        foreach (var p in plane.InlierPoints)
+        {
+            Vector3D d = p - centroid;
+            double du = Vector3D.DotProduct(d, u);
+            double dv = Vector3D.DotProduct(d, v);
+
+            if (du < minU) minU = du;
+            if (du > maxU) maxU = du;
+            if (dv < minV) minV = dv;
+            if (dv > maxV) maxV = dv;
+        }
+
+        // Pad the rectangle a bit beyond the inlier extents
+        double du = maxU - minU;
+        double dv = maxV - minV;
+        double padU = du * (paddingFactor - 1.0) / 2.0;
+        double padV = dv * (paddingFactor - 1.0) / 2.0;
+
+        minU -= padU; maxU += padU;
+        minV -= padV; maxV += padV;
+
+        // Corners in 3D: center + combination of (u, v)
+        Point3D p00 = centroid + minU * u + minV * v;
+        Point3D p10 = centroid + maxU * u + minV * v;
+        Point3D p11 = centroid + maxU * u + maxV * v;
+        Point3D p01 = centroid + minU * u + maxV * v;
+
+        var mb = new MeshBuilder(false, false);
+        mb.AddQuad(p00, p10, p11, p01);
+        var mesh = mb.ToMesh();
+
+        // Semi-transparent material so you can see the cloud through it
+        var frontBrush = new SolidColorBrush(Color.FromArgb(80, 0, 255, 0));  // translucent green
+        var backBrush  = new SolidColorBrush(Color.FromArgb(40, 0, 255, 0));
+
+        var material   = new DiffuseMaterial(frontBrush);
+        var backMat    = new DiffuseMaterial(backBrush);
+
+        return new GeometryModel3D
+        {
+            Geometry    = mesh,
+            Material    = material,
+            BackMaterial = backMat
+        };
+    }
+}
+
+-------
+
+using PointCloudUtils; // where PlaneFitResult / FitHorizontalPlanesByHeight live
+
+private void ShowPlanesForCloud(Point3DCollection cloud)
+{
+    // 1. Fit planes
+    double bandThickness = 0.1;   // adjust to your Z spacing (e.g. 0.1 mm)
+    int minPoints = 500;
+
+    var planes = PointCloudPlaneFitting.FitHorizontalPlanesByHeight(
+        cloud,
+        bandThickness,
+        minPoints);
+
+    // 2. Build a Model3DGroup with one quad per plane
+    var group = new Model3DGroup();
+    foreach (var plane in planes)
+    {
+        var gm = PlaneVisualHelper.CreatePlaneGeometry(plane);
+        if (gm != null)
+            group.Children.Add(gm);
+    }
+
+    // 3. Put them into the PlanesModel visual in the viewport
+    PlanesModel.Content = group;
+
+    // Optional: zoom so everything is in view
+    Viewport.ZoomExtents();
 }
