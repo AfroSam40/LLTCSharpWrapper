@@ -124,3 +124,86 @@ public static double EstimateBlobVolumeBySlices(
 
     return totalVolume;
 }
+
+------
+
+
+public static Model3DGroup BuildBlobSlicesModel(
+    IEnumerable<BlobSlice> slices,
+    double angleStepDegrees = 15.0)
+{
+    var group = new Model3DGroup();
+    if (slices == null) return group;
+
+    int steps = (int)Math.Round(360.0 / angleStepDegrees);
+    if (steps < 6) steps = 6;
+
+    foreach (var s in slices)
+    {
+        if (s.Radius <= 0) continue;
+
+        // Normal for this slice
+        Vector3D n = s.Normal;
+        if (n.LengthSquared < 1e-12) continue;
+        n.Normalize();
+
+        // Build local u,v basis in the plane of the slice
+        Vector3D temp = Math.Abs(n.Z) < 0.9
+            ? new Vector3D(0, 0, 1)
+            : new Vector3D(0, 1, 0);
+
+        Vector3D u = Vector3D.CrossProduct(temp, n);
+        if (u.LengthSquared < 1e-12)
+            u = new Vector3D(1, 0, 0);
+        u.Normalize();
+
+        Vector3D v = Vector3D.CrossProduct(n, u);
+        v.Normalize();
+
+        var mesh = new MeshGeometry3D();
+        var positions = mesh.Positions;
+        var indices = mesh.TriangleIndices;
+
+        // Center vertex
+        int centerIndex = 0;
+        positions.Add(s.CenterWorld);
+
+        // Ring vertices
+        for (int i = 0; i < steps; i++)
+        {
+            double theta = 2.0 * Math.PI * i / steps;
+            Vector3D dir = Math.Cos(theta) * u + Math.Sin(theta) * v;
+            Point3D pt = s.CenterWorld + dir * s.Radius;
+            positions.Add(pt);
+        }
+
+        // Triangles (fan from center)
+        for (int i = 0; i < steps; i++)
+        {
+            int i0 = centerIndex;
+            int i1 = 1 + i;
+            int i2 = 1 + ((i + 1) % steps);
+
+            indices.Add(i0);
+            indices.Add(i1);
+            indices.Add(i2);
+        }
+
+        var frontBrush = new SolidColorBrush(Color.FromArgb(60, 255, 0, 0));   // transparent red
+        var backBrush  = new SolidColorBrush(Color.FromArgb(30, 255, 0, 0));
+
+        var matFront = new DiffuseMaterial(frontBrush);
+        var matBack  = new DiffuseMaterial(backBrush);
+
+        var gm = new GeometryModel3D
+        {
+            Geometry     = mesh,
+            Material     = matFront,
+            BackMaterial = matBack
+        };
+
+        group.Children.Add(gm);
+    }
+
+    return group;
+}
