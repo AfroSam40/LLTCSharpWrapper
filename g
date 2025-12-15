@@ -1,209 +1,191 @@
-public static double EstimateBlobVolumeBySlices(
-    Point3DCollection points,
-    PlaneFitResult basePlane,
-    double sliceThickness,
-    out List<BlobSlice> slices,
-    int minPointsPerSlice = 50)
+using System.Windows.Media;
+using System.Windows.Media.Media3D;
+
+public static class PointCloudProcessing
 {
-    slices = new List<BlobSlice>();
-    if (points == null || points.Count == 0) return 0.0;
-    if (sliceThickness <= 0) throw new ArgumentOutOfRangeException(nameof(sliceThickness));
-
-    // ---- 1. Build orthonormal basis (u, v, n) ----
-    Vector3D n = basePlane.Normal;
-    if (n.LengthSquared < 1e-12) return 0.0;
-
-    // Force normal to point "up" in +Z (helps make h > 0 mean "above the plane").
-    if (Vector3D.DotProduct(n, new Vector3D(0, 0, 1)) < 0)
+    /// <summary>
+    /// Build a 3D model consisting of thick “puck” slices for a Hershey-kiss blob.
+    /// Each slice is a short cylinder centered at BlobSlice.CenterWorld with
+    /// axis = BlobSlice.Normal and radius = BlobSlice.Radius.
+    /// </summary>
+    /// <param name="slices">Blob slices from EstimateBlobVolumeBySlices.</param>
+    /// <param name="visualThickness">
+    /// Thickness of each slice in world units (purely visual; 
+    /// volume computation still comes from your numeric routine).
+    /// </param>
+    /// <param name="angleStepDegrees">
+    /// Angular step for polygonizing the circle (smaller = smoother, heavier).
+    /// </param>
+    public static Model3DGroup BuildBlobSlicesModelWithThickness(
+        IEnumerable<BlobSlice> slices,
+        double visualThickness,
+        double angleStepDegrees = 15.0)
     {
-        n = -n;
-        basePlane.Normal = n;
-    }
-    n.Normalize();
+        if (slices == null) throw new ArgumentNullException(nameof(slices));
+        if (visualThickness <= 0) throw new ArgumentOutOfRangeException(nameof(visualThickness));
+        if (angleStepDegrees <= 0 || angleStepDegrees > 180)
+            throw new ArgumentOutOfRangeException(nameof(angleStepDegrees));
 
-    // Choose a vector not parallel to n for constructing u
-    Vector3D temp = Math.Abs(n.Z) < 0.9
-        ? new Vector3D(0, 0, 1)
-        : new Vector3D(0, 1, 0);
+        var group = new Model3DGroup();
 
-    Vector3D u = Vector3D.CrossProduct(temp, n);
-    if (u.LengthSquared < 1e-12)
-        u = new Vector3D(1, 0, 0);
-    u.Normalize();
-
-    Vector3D v = Vector3D.CrossProduct(n, u);
-    v.Normalize();
-
-    Point3D origin = basePlane.Centroid;
-
-    // ---- 2. Transform points into local (u, v, n) coords; keep only above plane ----
-    var localPoints = new List<(double U, double V, double H)>(points.Count);
-
-    foreach (var p in points)
-    {
-        Vector3D d = p - origin;
-
-        double h  = Vector3D.DotProduct(d, n); // height above plane
-        if (h <= 0.0)       // <-- Only keep blob side
-            continue;
-
-        double uu = Vector3D.DotProduct(d, u); // in-plane coord
-        double vv = Vector3D.DotProduct(d, v);
-
-        localPoints.Add((uu, vv, h));
-    }
-
-    if (localPoints.Count == 0)
-        return 0.0;
-
-    // ---- 3. Determine height range and slice grid ----
-    double minH = localPoints.Min(p => p.H);
-    double maxH = localPoints.Max(p => p.H);
-
-    // Ensure we start at ~0 (just above plane) for sanity
-    if (minH < 0) minH = 0;
-
-    int sliceCount = (int)Math.Ceiling((maxH - minH) / sliceThickness);
-    if (sliceCount <= 0) return 0.0;
-
-    double totalVolume = 0.0;
-
-    // ---- 4. Slice loop ----
-    for (int i = 0; i < sliceCount; i++)
-    {
-        double h0 = minH + i * sliceThickness;
-        double h1 = h0 + sliceThickness;
-        double hCenter = 0.5 * (h0 + h1);
-
-        // Points belonging to this slice
-        var slicePoints = localPoints
-            .Where(p => p.H >= h0 && p.H < h1)
-            .ToList();
-
-        if (slicePoints.Count < minPointsPerSlice)
-            continue;
-
-        // Compute centroid in local (u,v) for this slice
-        double cx = slicePoints.Average(p => p.U);
-        double cy = slicePoints.Average(p => p.V);
-
-        // Compute RMS radius around that centroid
-        double avgR2 = slicePoints.Average(p =>
+        foreach (var s in slices)
         {
-            double du = p.U - cx;
-            double dv = p.V - cy;
-            return du * du + dv * dv;
-        });
+            if (s == null) continue;
+            if (s.Radius <= 0) continue;
+            if (s.PointCount <= 0) continue;
 
-        double radius = Math.Sqrt(avgR2);
-        if (radius <= 0) continue;
+            var gm = BuildSlicePuckGeometry(s, visualThickness, angleStepDegrees);
+            if (gm != null)
+                group.Children.Add(gm);
+        }
 
-        double area = Math.PI * radius * radius;
-        double volumeSlice = area * sliceThickness;
-        totalVolume += volumeSlice;
-
-        // World-space center of this slice
-        Point3D centerWorld =
-            origin +
-            n * hCenter +
-            u * cx +
-            v * cy;
-
-        slices.Add(new BlobSlice
-        {
-            H0          = h0,
-            H1          = h1,
-            HCenter     = hCenter,
-            CenterWorld = centerWorld,
-            Normal      = n,
-            Radius      = radius,
-            Area        = area,
-            PointCount  = slicePoints.Count
-        });
+        return group;
     }
 
-    return totalVolume;
-}
-
-------
-
-
-public static Model3DGroup BuildBlobSlicesModel(
-    IEnumerable<BlobSlice> slices,
-    double angleStepDegrees = 15.0)
-{
-    var group = new Model3DGroup();
-    if (slices == null) return group;
-
-    int steps = (int)Math.Round(360.0 / angleStepDegrees);
-    if (steps < 6) steps = 6;
-
-    foreach (var s in slices)
+    /// <summary>
+    /// Build a single thick disc (short cylinder) for one slice.
+    /// </summary>
+    private static GeometryModel3D? BuildSlicePuckGeometry(
+        BlobSlice slice,
+        double thickness,
+        double angleStepDegrees)
     {
-        if (s.Radius <= 0) continue;
+        Vector3D n = slice.Normal;
+        if (n.LengthSquared < 1e-12)
+            return null;
 
-        // Normal for this slice
-        Vector3D n = s.Normal;
-        if (n.LengthSquared < 1e-12) continue;
         n.Normalize();
+        double halfT = thickness / 2.0;
+        double radius = slice.Radius;
+        Point3D center = slice.CenterWorld;
 
-        // Build local u,v basis in the plane of the slice
+        // ---- 1. Build local orthonormal basis (u, v, n) ----
         Vector3D temp = Math.Abs(n.Z) < 0.9
             ? new Vector3D(0, 0, 1)
-            : new Vector3D(0, 1, 0);
+            : new Vector3D(1, 0, 0);
 
         Vector3D u = Vector3D.CrossProduct(temp, n);
         if (u.LengthSquared < 1e-12)
-            u = new Vector3D(1, 0, 0);
+            return null;
         u.Normalize();
 
         Vector3D v = Vector3D.CrossProduct(n, u);
         v.Normalize();
 
-        var mesh = new MeshGeometry3D();
-        var positions = mesh.Positions;
-        var indices = mesh.TriangleIndices;
+        // ---- 2. Prepare collections ----
+        var positions = new Point3DCollection();
+        var triangleIndices = new Int32Collection();
+        var normals = new Vector3DCollection();
 
-        // Center vertex
-        int centerIndex = 0;
-        positions.Add(s.CenterWorld);
+        // Colors: translucent red
+        var frontBrush = new SolidColorBrush(Color.FromArgb(96, 255, 0, 0));
+        var backBrush  = new SolidColorBrush(Color.FromArgb(96, 255, 0, 0));
+        frontBrush.Freeze();
+        backBrush.Freeze();
 
-        // Ring vertices
+        // ---- 3. Centers ----
+        Point3D topCenter = center + n * halfT;
+        Point3D bottomCenter = center - n * halfT;
+
+        int idxTopCenter = positions.Count;
+        positions.Add(topCenter);
+        normals.Add(n);
+
+        int idxBottomCenter = positions.Count;
+        positions.Add(bottomCenter);
+        normals.Add(-n);
+
+        // ---- 4. Rings ----
+        int steps = (int)Math.Round(360.0 / angleStepDegrees);
+        if (steps < 3) steps = 3;
+
+        // Store indices of ring vertices
+        int[] topRing = new int[steps];
+        int[] bottomRing = new int[steps];
+
+        double radiansStep = Math.PI * 2.0 / steps;
+
         for (int i = 0; i < steps; i++)
         {
-            double theta = 2.0 * Math.PI * i / steps;
-            Vector3D dir = Math.Cos(theta) * u + Math.Sin(theta) * v;
-            Point3D pt = s.CenterWorld + dir * s.Radius;
-            positions.Add(pt);
+            double angle = i * radiansStep;
+            // radial direction in the plane
+            Vector3D dir = Math.Cos(angle) * u + Math.Sin(angle) * v;
+            dir.Normalize();
+
+            Point3D topPt    = topCenter    + dir * radius;
+            Point3D bottomPt = bottomCenter + dir * radius;
+
+            int idxTop = positions.Count;
+            positions.Add(topPt);
+            // For nicer shading on sides, use outward radial normal for ring verts
+            normals.Add(dir);
+
+            int idxBottom = positions.Count;
+            positions.Add(bottomPt);
+            normals.Add(dir);
+
+            topRing[i] = idxTop;
+            bottomRing[i] = idxBottom;
         }
 
-        // Triangles (fan from center)
+        // ---- 5. Top & bottom caps ----
         for (int i = 0; i < steps; i++)
         {
-            int i0 = centerIndex;
-            int i1 = 1 + i;
-            int i2 = 1 + ((i + 1) % steps);
+            int next = (i + 1) % steps;
 
-            indices.Add(i0);
-            indices.Add(i1);
-            indices.Add(i2);
+            int iTop      = topRing[i];
+            int iTopNext  = topRing[next];
+            int iBottom   = bottomRing[i];
+            int iBottomNx = bottomRing[next];
+
+            // Top cap (winding so normal ~ +n)
+            triangleIndices.Add(idxTopCenter);
+            triangleIndices.Add(iTop);
+            triangleIndices.Add(iTopNext);
+
+            // Bottom cap (winding so normal ~ -n)
+            triangleIndices.Add(idxBottomCenter);
+            triangleIndices.Add(iBottomNx);
+            triangleIndices.Add(iBottom);
         }
 
-        var frontBrush = new SolidColorBrush(Color.FromArgb(60, 255, 0, 0));   // transparent red
-        var backBrush  = new SolidColorBrush(Color.FromArgb(30, 255, 0, 0));
-
-        var matFront = new DiffuseMaterial(frontBrush);
-        var matBack  = new DiffuseMaterial(backBrush);
-
-        var gm = new GeometryModel3D
+        // ---- 6. Side walls ----
+        for (int i = 0; i < steps; i++)
         {
-            Geometry     = mesh,
-            Material     = matFront,
-            BackMaterial = matBack
+            int next = (i + 1) % steps;
+
+            int iTop      = topRing[i];
+            int iTopNext  = topRing[next];
+            int iBottom   = bottomRing[i];
+            int iBottomNx = bottomRing[next];
+
+            // Quad = (top_i, bottom_i, bottom_next, top_next)
+            // Triangle 1
+            triangleIndices.Add(iTop);
+            triangleIndices.Add(iBottom);
+            triangleIndices.Add(iBottomNx);
+
+            // Triangle 2
+            triangleIndices.Add(iTop);
+            triangleIndices.Add(iBottomNx);
+            triangleIndices.Add(iTopNext);
+        }
+
+        var mesh = new MeshGeometry3D
+        {
+            Positions = positions,
+            TriangleIndices = triangleIndices,
+            Normals = normals
         };
 
-        group.Children.Add(gm);
-    }
+        var material = new DiffuseMaterial(frontBrush);
+        var backMat  = new DiffuseMaterial(backBrush);
 
-    return group;
+        return new GeometryModel3D
+        {
+            Geometry = mesh,
+            Material = material,
+            BackMaterial = backMat
+        };
+    }
 }
