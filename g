@@ -1,4 +1,4 @@
-public static double EstimateBlobVolumeBySlicesUsingHull(
+public static double EstimateBlobVolumeBySlicesUsingHull_Cumulative(
     Point3DCollection points,
     PlaneFitResult basePlane,
     double sliceThickness,
@@ -12,11 +12,10 @@ public static double EstimateBlobVolumeBySlicesUsingHull(
     if (sliceThickness <= 0.0)
         throw new ArgumentOutOfRangeException(nameof(sliceThickness));
 
-    // ---------- 1. Orthonormal basis (u, v, n) with AUTO NORMAL ORIENTATION ----------
+    // ---------- 1. Orthonormal basis (u, v, n) with auto normal orientation ----------
     Vector3D n = basePlane.Normal;
     if (n.LengthSquared < 1e-12)
         throw new ArgumentException("Base plane normal is zero.", nameof(basePlane));
-
     n.Normalize();
 
     // Flip n so that most points lie at positive height
@@ -31,7 +30,7 @@ public static double EstimateBlobVolumeBySlicesUsingHull(
     if (signSum < 0.0)
         n = -n;
 
-    // Build tangential basis u, v
+    // Tangent basis in plane
     Vector3D temp = Math.Abs(n.Z) < 0.9
         ? new Vector3D(0, 0, 1)
         : new Vector3D(1, 0, 0);
@@ -55,8 +54,9 @@ public static double EstimateBlobVolumeBySlicesUsingHull(
         Vector3D d = p - origin;
         double h = Vector3D.DotProduct(d, n); // height above plane
 
+        // keep only points at / above the plane (small tolerance)
         if (h < -1e-6)
-            continue; // clearly below plane (ignore)
+            continue;
 
         double uu = Vector3D.DotProduct(d, u);
         double vv = Vector3D.DotProduct(d, v);
@@ -69,7 +69,7 @@ public static double EstimateBlobVolumeBySlicesUsingHull(
     if (local.Count == 0)
         return 0.0;
 
-    // Global in-plane centroid for the whole blob
+    // One global in-plane centroid (for nice visual alignment)
     double globalU = sumUAll / local.Count;
     double globalV = sumVAll / local.Count;
 
@@ -81,66 +81,69 @@ public static double EstimateBlobVolumeBySlicesUsingHull(
     if (sliceCount <= 0)
         return 0.0;
 
-    var sliceBuckets = new List<List<(double U, double V, double H)>>(sliceCount);
-    for (int i = 0; i < sliceCount; i++)
-        sliceBuckets.Add(new List<(double U, double V, double H)>());
-
-    foreach (var (U, V, H) in local)
-    {
-        int idx = (int)((H - minH) / sliceThickness);
-        if (idx < 0) idx = 0;
-        if (idx >= sliceCount) idx = sliceCount - 1;
-        sliceBuckets[idx].Add((U, V, H));
-    }
-
-    // ---------- 3. Slice hull area, global center for visualization ----------
+    // ---------- 3. Cumulative hull per slice ----------
     double totalVolume = 0.0;
+    double prevCumArea = 0.0;
 
     for (int i = 0; i < sliceCount; i++)
     {
-        var bucket = sliceBuckets[i];
+        double hTop = minH + (i + 1) * sliceThickness;
+        double hBottom = minH + i * sliceThickness;
+        double hCenter = 0.5 * (hBottom + hTop);
+
+        // cumulative: all points from base (minH) up to this slice top
+        var bucket = new List<(double U, double V, double H)>();
+        foreach (var t in local)
+        {
+            if (t.H >= minH && t.H <= hTop)
+                bucket.Add(t);
+        }
+
         if (bucket.Count < minPointsPerSlice)
             continue;
 
-        // 2D points for convex hull (area only)
         var pts2D = new List<Point>(bucket.Count);
         foreach (var (U, V, _) in bucket)
             pts2D.Add(new Point(U, V));
 
-        double area = ComputeConvexHullArea(pts2D);
-        if (area <= 0)
+        // CUMULATIVE hull area at this height
+        double cumArea = ComputeConvexHullArea(pts2D);
+        if (cumArea <= 0)
             continue;
 
-        double h0 = minH + i * sliceThickness;
-        double h1 = h0 + sliceThickness;
-        double hCenter = 0.5 * (h0 + h1);
+        // effective cross-section area for this band = area difference
+        double bandArea = cumArea - prevCumArea;
+        if (bandArea < 0) bandArea = 0; // guard against numerical noise
 
-        // Center for visualization uses GLOBAL (U,V),
-        // so slices stack nicely along a single axis
+        // physical volume contribution for this slice
+        totalVolume += bandArea * sliceThickness;
+
+        // Visual center: use global (U, V) so slices line up smoothly
         Point3D centerWorld =
             origin +
             u * globalU +
             v * globalV +
             n * hCenter;
 
-        double radius = Math.Sqrt(area / Math.PI);
+        double radius = bandArea > 0
+            ? Math.Sqrt(bandArea / Math.PI)
+            : Math.Sqrt(cumArea / Math.PI); // fallback
 
         slices.Add(new BlobSlice
         {
-            H0 = h0,
-            H1 = h1,
+            H0 = hBottom,
+            H1 = hTop,
             HCenter = hCenter,
-            // store both for debugging
             UCenter = globalU,
             VCenter = globalV,
             CenterWorld = centerWorld,
             Normal = n,
             Radius = radius,
-            Area = area,
+            Area = bandArea,      // band area (effective cross-section)
             PointCount = bucket.Count
         });
 
-        totalVolume += area * sliceThickness;
+        prevCumArea = cumArea;
     }
 
     return totalVolume;
