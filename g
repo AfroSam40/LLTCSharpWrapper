@@ -226,3 +226,43 @@ namespace LLT
         }
     }
 }
+
+
+----using System;
+using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Interop;
+using System.Windows.Media.Imaging;
+
+public static class BitmapExtensions
+{
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DeleteObject(IntPtr hObject);
+
+    public static BitmapSource ToBitmapSource(this Bitmap bitmap)
+    {
+        if (bitmap == null)
+            throw new ArgumentNullException(nameof(bitmap));
+
+        IntPtr hBitmap = bitmap.GetHbitmap();
+
+        try
+        {
+            var source = Imaging.CreateBitmapSourceFromHBitmap(
+                hBitmap,
+                IntPtr.Zero,
+                Int32Rect.Empty,
+                BitmapSizeOptions.FromEmptyOptions());
+
+            // Freeze for cross-thread safety (optional but nice)
+            source.Freeze();
+            return source;
+        }
+        finally
+        {
+            DeleteObject(hBitmap); // avoid GDI handle leak
+        }
+    }
+}
