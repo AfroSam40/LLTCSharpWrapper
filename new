@@ -1,35 +1,33 @@
-using System.Windows;
-using System.Windows.Media.Media3D;
-
-public static class PointCloudRegionOps
+public bool TryGetLaserState(out uint laserState)
 {
-    /// <summary>
-    /// Returns a new point cloud containing only the points whose (X, Y)
-    /// lie inside the given 2D rectangle (in the XY plane).
-    /// </summary>
-    /// <param name="points">Input point cloud.</param>
-    /// <param name="rect">
-    /// Rectangle in XY coordinates. A point is kept if (X, Y) is inside this rect.
-    /// </param>
-    /// <returns>Filtered Point3DCollection.</returns>
-    public static Point3DCollection ClipToRectangleXY(
-        Point3DCollection points,
-        Rect rect)
+    laserState = 0;
+
+    if (!_connected)
+        throw new InvalidOperationException("Sensor not connected. Call Connect() first.");
+
+    int ret = CLLTI.GetFeature(device, CLLTI.FEATURE_FUNCTION_LASERPOWER, ref laserState);
+    if (ret < CLLTI.GENERAL_FUNCTION_OK)
     {
-        var result = new Point3DCollection();
-
-        if (points == null || points.Count == 0)
-            return result;
-
-        foreach (var p in points)
-        {
-            // Check inclusion in the XY rectangle
-            if (rect.Contains(new Point(p.X, p.Y)))
-            {
-                result.Add(p);
-            }
-        }
-
-        return result;
+        SetError("GetFeature(LASERPOWER)", ret);
+        return false;
     }
+
+    return true;
+}
+
+public bool SetLaserOn(bool on)
+{
+    if (!_connected)
+        throw new InvalidOperationException("Sensor not connected. Call Connect() first.");
+
+    uint val = on ? 1u : 0u;  // 1 = ON, 0 = OFF for typical LLTs
+
+    int ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_LASERPOWER, val);
+    if (ret < CLLTI.GENERAL_FUNCTION_OK)
+    {
+        SetError("SetFeature(LASERPOWER)", ret);
+        return false;
+    }
+
+    return true;
 }
