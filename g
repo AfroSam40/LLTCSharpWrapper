@@ -1,226 +1,178 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Windows.Media;
 using System.Windows.Media.Media3D;
+using HelixToolkit.Wpf;
 
 namespace PointCloudUtils
 {
-    /// <summary>
-    /// Result of fitting a (roughly horizontal) plane z = a*x + b*y + c.
-    /// </summary>
-    public class PlaneFitResult
+    public static class PlaneVisualBuilder
     {
-        /// <summary>
-        /// Plane coefficients: z = A * x + B * y + C
-        /// </summary>
-        public double A { get; set; }
-        public double B { get; set; }
-        public double C { get; set; }
-
-        /// <summary>
-        /// Plane normal (normalized).
-        /// </summary>
-        public Vector3D Normal { get; set; }
-
-        /// <summary>
-        /// Centroid of the inlier points used for the fit.
-        /// </summary>
-        public Point3D Centroid { get; set; }
-
-        /// <summary>
-        /// Average absolute distance (in Z) from points to plane.
-        /// </summary>
-        public double AverageError { get; set; }
-
-        /// <summary>
-        /// The points that belong to this plane (height band / surface).
-        /// </summary>
-        public List<Point3D> InlierPoints { get; set; } = new List<Point3D>();
-    }
-
-    public static class PointCloudPlaneFitting
-    {
-        /// <summary>
-        /// Finds multiple best-fit (roughly horizontal) planes in a point cloud.
-        /// 
-        /// Points are first sorted by Z. We then walk that list and build
-        /// contiguous "surfaces" such that consecutive points whose Z
-        /// differs by at most <paramref name="bandThickness"/> belong to
-        /// the same surface. A "significant" jump in Z (greater than this
-        /// threshold) starts a new surface.
-        /// 
-        /// So:
-        ///   - bandThickness  = "significant height change" threshold
-        ///   - minPointsPerPlane = only used to discard tiny/noisy surfaces
-        /// 
-        /// Assumes surfaces are mostly parallel to the XY plane.
-        /// </summary>
-        /// <param name="points">Input point cloud.</param>
-        /// <param name="bandThickness">
-        /// Maximum allowed |ΔZ| between *consecutive* sorted points to still
-        /// be considered the same surface. If the jump in Z between neighbors
-        /// is larger than this, we treat that as a transition to another surface.
-        /// </param>
-        /// <param name="minPointsPerPlane">
-        /// Minimum number of points a surface must have to be accepted.
-        /// Small clusters below this are ignored as noise, but they do NOT
-        /// affect where surface boundaries are placed.
-        /// </param>
-        /// <returns>List of plane-fit results (one per detected surface).</returns>
-        public static List<PlaneFitResult> FitHorizontalPlanesByHeight(
-            Point3DCollection points,
-            double bandThickness,
-            int minPointsPerPlane = 100)
+        private struct Point2
         {
-            var results = new List<PlaneFitResult>();
-            if (points == null || points.Count == 0)
-                return results;
-
-            // 1. Sort points by Z (ascending)
-            var sorted = points.OrderBy(p => p.Z).ToList();
-
-            // 2. Build surfaces based on *consecutive* Z jumps
-            var currentSurface = new List<Point3D>();
-            currentSurface.Add(sorted[0]);
-            double lastZ = sorted[0].Z;
-
-            for (int i = 1; i < sorted.Count; i++)
-            {
-                var p = sorted[i];
-                double dz = Math.Abs(p.Z - lastZ);
-
-                if (dz <= bandThickness)
-                {
-                    // Still the same surface
-                    currentSurface.Add(p);
-                }
-                else
-                {
-                    // We hit a significant jump in Z -> finish current surface
-                    if (currentSurface.Count >= minPointsPerPlane)
-                    {
-                        var plane = FitHorizontalPlane(currentSurface);
-                        if (plane != null)
-                            results.Add(plane);
-                    }
-
-                    // Start a new surface
-                    currentSurface = new List<Point3D> { p };
-                }
-
-                lastZ = p.Z;
-            }
-
-            // 3. Final surface
-            if (currentSurface.Count >= minPointsPerPlane)
-            {
-                var plane = FitHorizontalPlane(currentSurface);
-                if (plane != null)
-                    results.Add(plane);
-            }
-
-            return results;
+            public double X;
+            public double Y;
+            public Point2(double x, double y) { X = x; Y = y; }
         }
 
         /// <summary>
-        /// Fits a single plane z = a*x + b*y + c (least squares)
-        /// to the given (roughly horizontal) surface points.
-        /// Returns null if the system is degenerate.
+        /// Build a plane patch visual from a PlaneFitResult using the convex hull
+        /// of its inlier points. No MeshBuilder; uses MeshGeometry3D directly.
         /// </summary>
-        private static PlaneFitResult? FitHorizontalPlane(List<Point3D> pts)
+        /// <param name="plane">The fitted plane result.</param>
+        /// <param name="paddingFactor">
+        /// > 1.0 to slightly expand the hull around its centroid (e.g. 1.1).
+        /// = 1.0 for no padding.
+        /// </param>
+        /// <param name="fill">Brush for the plane.</param>
+        /// <returns>ModelVisual3D you can add to the viewport, or null if not enough points.</returns>
+        public static ModelVisual3D BuildPlanePatchVisual(
+            PlaneFitResult plane,
+            double paddingFactor,
+            Brush fill)
         {
-            int n = pts.Count;
-            if (n < 3)
+            var pts = plane.InlierPoints;
+            if (pts == null || pts.Count < 3)
                 return null;
 
-            // Accumulate sums for normal equations
-            double sumX = 0, sumY = 0, sumZ = 0;
-            double sumX2 = 0, sumY2 = 0, sumXY = 0;
-            double sumXZ = 0, sumYZ = 0;
+            // 1) Build orthonormal basis (u, v, n)
+            Vector3D n = plane.Normal;
+            if (n.LengthSquared < 1e-12)
+                n = new Vector3D(0, 0, 1);
+            n.Normalize();
 
+            // Pick an arbitrary "up" not collinear with n
+            Vector3D up = Math.Abs(n.Z) < 0.9
+                ? new Vector3D(0, 0, 1)
+                : new Vector3D(1, 0, 0);
+
+            Vector3D u = Vector3D.CrossProduct(n, up);
+            if (u.LengthSquared < 1e-12)
+                u = new Vector3D(1, 0, 0);
+            u.Normalize();
+
+            Vector3D v = Vector3D.CrossProduct(n, u);
+            v.Normalize();
+
+            Point3D c = plane.Centroid;
+
+            // 2) Project inliers into (u, v) coordinates centered at centroid
+            var proj2D = new List<Point2>(pts.Count);
             foreach (var p in pts)
             {
-                double x = p.X;
-                double y = p.Y;
-                double z = p.Z;
-
-                sumX  += x;
-                sumY  += y;
-                sumZ  += z;
-                sumX2 += x * x;
-                sumY2 += y * y;
-                sumXY += x * y;
-                sumXZ += x * z;
-                sumYZ += y * z;
+                Vector3D d = p - c;
+                double ux = Vector3D.DotProduct(d, u);
+                double vy = Vector3D.DotProduct(d, v);
+                proj2D.Add(new Point2(ux, vy));
             }
 
-            // Normal equation matrix A and RHS b for z = a*x + b*y + c:
-            // [ sumX2  sumXY  sumX ] [a] = [ sumXZ ]
-            // [ sumXY  sumY2  sumY ] [b]   [ sumYZ ]
-            // [ sumX   sumY   n    ] [c]   [ sumZ  ]
-            double a11 = sumX2, a12 = sumXY, a13 = sumX;
-            double a21 = sumXY, a22 = sumY2, a23 = sumY;
-            double a31 = sumX,  a32 = sumY,  a33 = n;
-
-            double b1 = sumXZ, b2 = sumYZ, b3 = sumZ;
-
-            double detA =
-                a11 * (a22 * a33 - a23 * a32) -
-                a12 * (a21 * a33 - a23 * a31) +
-                a13 * (a21 * a32 - a22 * a31);
-
-            if (Math.Abs(detA) < 1e-12)
-            {
-                // Degenerate system – points may be collinear or too noisy
+            // 3) Compute convex hull in 2D (monotone chain)
+            var hull = ComputeConvexHull(proj2D);
+            if (hull.Count < 3)
                 return null;
+
+            // 4) Optional padding: expand hull around its centroid
+            if (paddingFactor > 1.0)
+            {
+                double cx = hull.Average(p => p.X);
+                double cy = hull.Average(p => p.Y);
+
+                for (int i = 0; i < hull.Count; i++)
+                {
+                    var p = hull[i];
+                    double dx = p.X - cx;
+                    double dy = p.Y - cy;
+                    hull[i] = new Point2(
+                        cx + dx * paddingFactor,
+                        cy + dy * paddingFactor);
+                }
             }
 
-            double detA1 =
-                b1  * (a22 * a33 - a23 * a32) -
-                a12 * (b2  * a33 - a23 * b3 ) +
-                a13 * (b2  * a32 - a22 * b3 );
-
-            double detA2 =
-                a11 * (b2  * a33 - a23 * b3 ) -
-                b1  * (a21 * a33 - a23 * a31) +
-                a13 * (a21 * b3  - b2  * a31);
-
-            double detA3 =
-                a11 * (a22 * b3  - b2  * a32) -
-                a12 * (a21 * b3  - b2  * a31) +
-                b1  * (a21 * a32 - a22 * a31);
-
-            double A = detA1 / detA;
-            double B = detA2 / detA;
-            double C = detA3 / detA;
-
-            // Normal of plane z - A*x - B*y - C = 0 is (A, B, -1)
-            Vector3D normal = new Vector3D(A, B, -1.0);
-            if (normal.Length > 0)
-                normal.Normalize();
-
-            // Centroid
-            var centroid = new Point3D(sumX / n, sumY / n, sumZ / n);
-
-            // Average absolute error in Z
-            double errSum = 0;
-            foreach (var p in pts)
+            // 5) Build MeshGeometry3D from hull (triangle fan)
+            var mesh = new MeshGeometry3D
             {
-                double zFit = A * p.X + B * p.Y + C;
-                errSum += Math.Abs(p.Z - zFit);
-            }
-            double avgErr = errSum / n;
-
-            return new PlaneFitResult
-            {
-                A = A,
-                B = B,
-                C = C,
-                Normal = normal,
-                Centroid = centroid,
-                AverageError = avgErr,
-                InlierPoints = new List<Point3D>(pts)
+                Positions = new Point3DCollection(),
+                TriangleIndices = new Int32Collection()
             };
+
+            // Convert hull 2D -> 3D world positions on the plane
+            foreach (var h in hull)
+            {
+                Point3D wp = c + h.X * u + h.Y * v;
+                mesh.Positions.Add(wp);
+            }
+
+            int nVerts = mesh.Positions.Count;
+            if (nVerts < 3)
+                return null;
+
+            // Triangle fan: (0, i, i+1)
+            for (int i = 1; i < nVerts - 1; i++)
+            {
+                mesh.TriangleIndices.Add(0);
+                mesh.TriangleIndices.Add(i);
+                mesh.TriangleIndices.Add(i + 1);
+            }
+
+            // 6) Wrap into GeometryModel3D and ModelVisual3D
+            var mat = new DiffuseMaterial(fill);
+            var gm = new GeometryModel3D(mesh, mat)
+            {
+                BackMaterial = mat
+            };
+
+            var visual = new ModelVisual3D { Content = gm };
+            return visual;
+        }
+
+        /// <summary>
+        /// 2D convex hull via monotone chain; returns hull in CCW order.
+        /// </summary>
+        private static List<Point2> ComputeConvexHull(List<Point2> pts)
+        {
+            var points = pts
+                .OrderBy(p => p.X)
+                .ThenBy(p => p.Y)
+                .ToList();
+
+            if (points.Count <= 1)
+                return new List<Point2>(points);
+
+            List<Point2> lower = new List<Point2>();
+            foreach (var p in points)
+            {
+                while (lower.Count >= 2 &&
+                       Cross(lower[lower.Count - 2], lower[lower.Count - 1], p) <= 0)
+                {
+                    lower.RemoveAt(lower.Count - 1);
+                }
+                lower.Add(p);
+            }
+
+            List<Point2> upper = new List<Point2>();
+            for (int i = points.Count - 1; i >= 0; i--)
+            {
+                var p = points[i];
+                while (upper.Count >= 2 &&
+                       Cross(upper[upper.Count - 2], upper[upper.Count - 1], p) <= 0)
+                {
+                    upper.RemoveAt(upper.Count - 1);
+                }
+                upper.Add(p);
+            }
+
+            // Remove last point of each list because it’s the start of the other list
+            upper.RemoveAt(upper.Count - 1);
+            lower.RemoveAt(lower.Count - 1);
+
+            lower.AddRange(upper);
+            return lower;
+        }
+
+        private static double Cross(Point2 o, Point2 a, Point2 b)
+        {
+            return (a.X - o.X) * (b.Y - o.Y) - (a.Y - o.Y) * (b.X - o.X);
         }
     }
 }
