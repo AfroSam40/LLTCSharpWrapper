@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Media3D;
 using HelixToolkit.Wpf;
@@ -9,13 +10,6 @@ namespace PointCloudUtils
 {
     public static class PlaneVisualBuilder
     {
-        private struct Point2
-        {
-            public double X;
-            public double Y;
-            public Point2(double x, double y) { X = x; Y = y; }
-        }
-
         /// <summary>
         /// Build a plane patch visual from a PlaneFitResult using the convex hull
         /// of its inlier points. No MeshBuilder; uses MeshGeometry3D directly.
@@ -58,13 +52,13 @@ namespace PointCloudUtils
             Point3D c = plane.Centroid;
 
             // 2) Project inliers into (u, v) coordinates centered at centroid
-            var proj2D = new List<Point2>(pts.Count);
+            var proj2D = new List<Point>(pts.Count);
             foreach (var p in pts)
             {
                 Vector3D d = p - c;
                 double ux = Vector3D.DotProduct(d, u);
                 double vy = Vector3D.DotProduct(d, v);
-                proj2D.Add(new Point2(ux, vy));
+                proj2D.Add(new Point(ux, vy));
             }
 
             // 3) Compute convex hull in 2D (monotone chain)
@@ -83,7 +77,7 @@ namespace PointCloudUtils
                     var p = hull[i];
                     double dx = p.X - cx;
                     double dy = p.Y - cy;
-                    hull[i] = new Point2(
+                    hull[i] = new Point(
                         cx + dx * paddingFactor,
                         cy + dy * paddingFactor);
                 }
@@ -128,8 +122,9 @@ namespace PointCloudUtils
 
         /// <summary>
         /// 2D convex hull via monotone chain; returns hull in CCW order.
+        /// Uses System.Windows.Point.
         /// </summary>
-        private static List<Point2> ComputeConvexHull(List<Point2> pts)
+        private static List<Point> ComputeConvexHull(List<Point> pts)
         {
             var points = pts
                 .OrderBy(p => p.X)
@@ -137,9 +132,9 @@ namespace PointCloudUtils
                 .ToList();
 
             if (points.Count <= 1)
-                return new List<Point2>(points);
+                return new List<Point>(points);
 
-            List<Point2> lower = new List<Point2>();
+            List<Point> lower = new List<Point>();
             foreach (var p in points)
             {
                 while (lower.Count >= 2 &&
@@ -150,7 +145,7 @@ namespace PointCloudUtils
                 lower.Add(p);
             }
 
-            List<Point2> upper = new List<Point2>();
+            List<Point> upper = new List<Point>();
             for (int i = points.Count - 1; i >= 0; i--)
             {
                 var p = points[i];
@@ -170,7 +165,7 @@ namespace PointCloudUtils
             return lower;
         }
 
-        private static double Cross(Point2 o, Point2 a, Point2 b)
+        private static double Cross(Point o, Point a, Point b)
         {
             return (a.X - o.X) * (b.Y - o.Y) - (a.Y - o.Y) * (b.X - o.X);
         }
