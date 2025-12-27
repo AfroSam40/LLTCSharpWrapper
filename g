@@ -1,145 +1,264 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Windows;
 using System.Windows.Media.Media3D;
 
 namespace PointCloudUtils
 {
-    public static class PointCloudClustering
+    public class BlobSlice
+    {
+        public double H0 { get; set; }      // bottom of slice (height above base plane)
+        public double H1 { get; set; }      // top of slice
+        public double Area { get; set; }    // convex hull area for this slice
+        public double Volume { get; set; }  // Area * (H1 - H0)
+        public List<Point> Hull2D { get; set; } = new List<Point>();
+    }
+
+    public static class BlobVolumeTools
     {
         /// <summary>
-        /// Extracts the largest spatial cluster from a 3D point cloud using a
-        /// grid-hashed neighborhood search (much faster than naive O(N^2) DBSCAN).
-        /// 
-        /// A "cluster" is defined by points that are connected via neighbors
-        /// within 'radius'.
+        /// Estimates volume of a "blob" sitting on basePlane by slicing in height
+        /// and using 2D convex hull per slice. Now with 2D outlier rejection
+        /// before hull.
         /// </summary>
-        /// <param name="points">Input point cloud.</param>
-        /// <param name="radius">
-        /// Neighbor distance threshold (same units as your coordinates, e.g. mm).
+        /// <param name="points">3D point cloud of the blob + base around it.</param>
+        /// <param name="basePlane">Best-fit plane the blob sits on.</param>
+        /// <param name="sliceThickness">Height step in same units as points (e.g. mm).</param>
+        /// <param name="slices">Per-slice info (heights, area, hull, volume).</param>
+        /// <param name="minPointsPerSlice">
+        /// Minimum inlier points required to keep a slice. Default 50.
         /// </param>
-        /// <param name="minClusterSize">
-        /// Ignore clusters smaller than this (treated as noise).
+        /// <param name="outlierSigma">
+        /// Radial sigma threshold for outlier removal in 2D (e.g. 2.5–3.0). 
+        /// Set &lt;= 0 to disable outlier filtering.
         /// </param>
-        /// <returns>
-        /// A Point3DCollection containing the largest cluster's points
-        /// (or empty if nothing valid).
-        /// </returns>
-        public static Point3DCollection ExtractLargestCluster(
+        public static double EstimateBlobVolumeByHullSlices(
             Point3DCollection points,
-            double radius,
-            int minClusterSize = 50)
+            PlaneFitResult basePlane,
+            double sliceThickness,
+            out List<BlobSlice> slices,
+            int minPointsPerSlice = 50,
+            double outlierSigma = 2.5)
         {
-            var result = new Point3DCollection();
-            if (points == null || points.Count == 0 || radius <= 0)
-                return result;
+            slices = new List<BlobSlice>();
+            if (points == null || points.Count == 0 || sliceThickness <= 0)
+                return 0.0;
 
-            int n = points.Count;
-            double cellSize = radius; // grid spacing
-            double r2 = radius * radius;
+            // 1) Define plane normal and local 2D basis (u, v) on the plane
+            Vector3D n = basePlane.Normal;
+            if (n.Length < 1e-9)
+            {
+                // Fallback if Normal not set
+                n = new Vector3D(basePlane.A, basePlane.B, -1.0);
+            }
+            n.Normalize();
 
-            // 1) Build spatial hash: grid cell -> list of point indices
-            var grid = new Dictionary<(int gx, int gy, int gz), List<int>>(n);
+            // You already have this pattern elsewhere:
+            Vector3D arbitrary = Math.Abs(n.Z) < 0.9
+                ? new Vector3D(0, 0, 1)
+                : new Vector3D(0, 1, 0);
 
+            Vector3D u = Vector3D.CrossProduct(n, arbitrary);
+            u.Normalize();
+            Vector3D v = Vector3D.CrossProduct(n, u);
+            v.Normalize();
+
+            var origin = basePlane.Centroid;
+
+            // 2) Project all points once: we store (x2d, y2d, h)
+            var proj = new List<(double x, double y, double h)>(points.Count);
+            double maxH = double.MinValue;
+
+            foreach (var p in points)
+            {
+                // Vertical height above plane using plane equation
+                double zPlane = basePlane.A * p.X + basePlane.B * p.Y + basePlane.C;
+                double h = p.Z - zPlane;  // > 0 means above base plane
+
+                if (h <= 0.0)
+                    continue;             // ignore points below/at the base
+
+                // 2D coordinates in plane's local frame
+                Vector3D d = p - origin;
+                double x2d = Vector3D.DotProduct(d, u);
+                double y2d = Vector3D.DotProduct(d, v);
+
+                proj.Add((x2d, y2d, h));
+                if (h > maxH) maxH = h;
+            }
+
+            if (proj.Count == 0 || maxH <= 0)
+                return 0.0;
+
+            double totalVolume = 0.0;
+
+            // 3) Slice in height [0, maxH)
+            for (double h0 = 0.0; h0 < maxH; h0 += sliceThickness)
+            {
+                double h1 = h0 + sliceThickness;
+
+                // collect 2D points whose height is in this band
+                var slice2D = new List<Point>();
+                foreach (var (x, y, h) in proj)
+                {
+                    if (h >= h0 && h < h1)
+                        slice2D.Add(new Point(x, y));
+                }
+
+                if (slice2D.Count < minPointsPerSlice)
+                    continue;
+
+                // --- OUTLIER FILTERING (2D radial from centroid) ---
+                var inliers2D = RemoveRadialOutliers(slice2D, outlierSigma);
+
+                if (inliers2D.Count < 3)  // not enough to form a hull
+                    continue;
+
+                // 4) Convex hull on inlier points only
+                var hull = ComputeConvexHull2D(inliers2D);
+                if (hull == null || hull.Count < 3)
+                    continue;
+
+                double area = PolygonArea(hull);
+                if (area <= 0)
+                    continue;
+
+                double sliceVolume = area * sliceThickness;
+                totalVolume += sliceVolume;
+
+                slices.Add(new BlobSlice
+                {
+                    H0 = h0,
+                    H1 = h1,
+                    Area = area,
+                    Volume = sliceVolume,
+                    Hull2D = hull
+                });
+            }
+
+            return totalVolume;
+        }
+
+        /// <summary>
+        /// Remove 2D outliers based on radial distance from centroid.
+        /// Keeps points with distance <= mean + sigma * stddev.
+        /// If sigma &lt;= 0 or the filter removes too many points, returns original.
+        /// </summary>
+        private static List<Point> RemoveRadialOutliers(IList<Point> pts, double sigma)
+        {
+            int n = pts.Count;
+            if (n <= 3 || sigma <= 0)
+                return new List<Point>(pts);
+
+            // centroid
+            double sumX = 0, sumY = 0;
             for (int i = 0; i < n; i++)
             {
-                var p = points[i];
-                int gx = (int)Math.Floor(p.X / cellSize);
-                int gy = (int)Math.Floor(p.Y / cellSize);
-                int gz = (int)Math.Floor(p.Z / cellSize);
-                var key = (gx, gy, gz);
-
-                if (!grid.TryGetValue(key, out var list))
-                {
-                    list = new List<int>();
-                    grid[key] = list;
-                }
-                list.Add(i);
+                sumX += pts[i].X;
+                sumY += pts[i].Y;
             }
+            double cx = sumX / n;
+            double cy = sumY / n;
 
-            // 2) BFS over points, restricted to local cells
-            var visited = new bool[n];
-            var queue   = new Queue<int>();
-
-            List<int>? bestClusterIndices = null;
-
-            foreach (var cellEntry in grid)
+            // distances
+            double[] r = new double[n];
+            double sumR = 0, sumR2 = 0;
+            for (int i = 0; i < n; i++)
             {
-                foreach (int startIdx in cellEntry.Value)
-                {
-                    if (visited[startIdx])
-                        continue;
-
-                    // Start a new cluster from this point
-                    var cluster = new List<int>();
-                    queue.Clear();
-
-                    visited[startIdx] = true;
-                    queue.Enqueue(startIdx);
-                    cluster.Add(startIdx);
-
-                    while (queue.Count > 0)
-                    {
-                        int idx = queue.Dequeue();
-                        var p0 = points[idx];
-
-                        // Find grid cell of this point
-                        int gx = (int)Math.Floor(p0.X / cellSize);
-                        int gy = (int)Math.Floor(p0.Y / cellSize);
-                        int gz = (int)Math.Floor(p0.Z / cellSize);
-
-                        // Check this cell and the 26 neighbors
-                        for (int dx = -1; dx <= 1; dx++)
-                        {
-                            for (int dy = -1; dy <= 1; dy++)
-                            {
-                                for (int dz = -1; dz <= 1; dz++)
-                                {
-                                    var key = (gx + dx, gy + dy, gz + dz);
-                                    if (!grid.TryGetValue(key, out var neighborList))
-                                        continue;
-
-                                    foreach (int j in neighborList)
-                                    {
-                                        if (visited[j]) continue;
-
-                                        var pj = points[j];
-                                        double dxp = pj.X - p0.X;
-                                        double dyp = pj.Y - p0.Y;
-                                        double dzp = pj.Z - p0.Z;
-                                        double dist2 = dxp * dxp + dyp * dyp + dzp * dzp;
-
-                                        if (dist2 <= r2)
-                                        {
-                                            visited[j] = true;
-                                            queue.Enqueue(j);
-                                            cluster.Add(j);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Keep the largest cluster that passes the min size
-                    if (cluster.Count >= minClusterSize)
-                    {
-                        if (bestClusterIndices == null || cluster.Count > bestClusterIndices.Count)
-                        {
-                            bestClusterIndices = cluster;
-                        }
-                    }
-                }
+                double dx = pts[i].X - cx;
+                double dy = pts[i].Y - cy;
+                double d = Math.Sqrt(dx * dx + dy * dy);
+                r[i] = d;
+                sumR += d;
+                sumR2 += d * d;
             }
 
-            if (bestClusterIndices == null || bestClusterIndices.Count == 0)
-                return result;
+            double mean = sumR / n;
+            double var = Math.Max(sumR2 / n - mean * mean, 0.0);
+            double std = Math.Sqrt(var);
 
-            // 3) Build resulting Point3DCollection
-            foreach (int idx in bestClusterIndices)
-                result.Add(points[idx]);
+            if (std <= 0)
+                return new List<Point>(pts);  // all distances almost identical
 
-            return result;
+            double maxR = mean + sigma * std;
+
+            var inliers = new List<Point>(n);
+            for (int i = 0; i < n; i++)
+            {
+                if (r[i] <= maxR)
+                    inliers.Add(pts[i]);
+            }
+
+            // If filter nuked almost everything, fall back to original
+            if (inliers.Count < 3)
+                return new List<Point>(pts);
+
+            return inliers;
+        }
+
+        /// <summary>
+        /// Standard 2D convex hull (monotone chain).
+        /// </summary>
+        private static List<Point> ComputeConvexHull2D(IList<Point> pts)
+        {
+            if (pts == null || pts.Count <= 1)
+                return pts?.ToList() ?? new List<Point>();
+
+            var sorted = pts.OrderBy(p => p.X).ThenBy(p => p.Y).ToList();
+
+            var lower = new List<Point>();
+            foreach (var p in sorted)
+            {
+                while (lower.Count >= 2 &&
+                       Cross(lower[lower.Count - 2], lower[lower.Count - 1], p) <= 0)
+                {
+                    lower.RemoveAt(lower.Count - 1);
+                }
+                lower.Add(p);
+            }
+
+            var upper = new List<Point>();
+            for (int i = sorted.Count - 1; i >= 0; i--)
+            {
+                var p = sorted[i];
+                while (upper.Count >= 2 &&
+                       Cross(upper[upper.Count - 2], upper[upper.Count - 1], p) <= 0)
+                {
+                    upper.RemoveAt(upper.Count - 1);
+                }
+                upper.Add(p);
+            }
+
+            // Remove duplicate endpoints
+            if (lower.Count > 0) lower.RemoveAt(lower.Count - 1);
+            if (upper.Count > 0) upper.RemoveAt(upper.Count - 1);
+
+            lower.AddRange(upper);
+            return lower;
+        }
+
+        private static double Cross(Point a, Point b, Point c)
+        {
+            return (b.X - a.X) * (c.Y - a.Y) - (b.Y - a.Y) * (c.X - a.X);
+        }
+
+        /// <summary>
+        /// Signed polygon area (positive for CCW). We use absolute value.
+        /// </summary>
+        private static double PolygonArea(IList<Point> poly)
+        {
+            int n = poly.Count;
+            if (n < 3) return 0;
+
+            double sum = 0;
+            for (int i = 0; i < n; i++)
+            {
+                var p0 = poly[i];
+                var p1 = poly[(i + 1) % n];
+                sum += p0.X * p1.Y - p1.X * p0.Y;
+            }
+            return Math.Abs(sum) * 0.5;
         }
     }
 }
