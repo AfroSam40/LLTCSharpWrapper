@@ -1,174 +1,126 @@
-using System;
-using System.Collections.Generic;
+using OpenCvSharp;
 using System.Drawing;
-using System.Drawing.Imaging;
-using System.Linq;
-using System.Windows.Media.Media3D;
+using Bitmap = System.Drawing.Bitmap;
 
-public static class BmpHelper
+public static class RectAnnotator
 {
-    // Assume you already have:
-    //  - PlaneBasis / PlaneFitResult
-    //  - ProjectPointToPlane2D(Point3D, PlaneBasis)
-    //  - ProjectionBitmapResult class (Bitmap + bounds etc.)
-
-    /// <summary>
-    /// Project a 3D point cloud onto a plane and rasterize to a bitmap.
-    /// White pixels represent “material”, black pixels are voids.
-    /// The point radius is chosen automatically from point spacing
-    /// if pointRadiusPixels <= 0.
-    /// </summary>
-    public static ProjectionBitmapResult ProjectToBitmap(
-        Point3DCollection points,
-        PlaneBasis plane,
-        double pixelSize = 1.0,       // 1:1 if your projected units are "pixel-like"
-        int paddingPixels = 4,
-        int pointRadiusPixels = 0      // <= 0 => auto
-    )
+    private static void DrawCross(Mat img, Point center, int size, Scalar color, int thickness = 2)
     {
-        if (points == null || points.Count == 0)
-            return null;
+        Cv2.Line(img,
+            new OpenCvSharp.Point(center.X - size, center.Y),
+            new OpenCvSharp.Point(center.X + size, center.Y),
+            color, thickness);
 
-        // --- 1. Project to plane (2D) ---
-        var projected = new List<PointF>(points.Count);
-        foreach (var p in points)
-        {
-            var q = PointCloudProcessing.ProjectPointToPlane2D(p, plane); // returns System.Windows.Point
-            projected.Add(new PointF((float)q.X, (float)q.Y));
-        }
-
-        double minX = projected.Min(pt => pt.X);
-        double maxX = projected.Max(pt => pt.X);
-        double minY = projected.Min(pt => pt.Y);
-        double maxY = projected.Max(pt => pt.Y);
-
-        double widthWorld  = maxX - minX;
-        double heightWorld = maxY - minY;
-        if (widthWorld <= 0 || heightWorld <= 0)
-            throw new InvalidOperationException("Degenerate projection bounds.");
-
-        // --- 2. Auto-estimate radius if requested ---
-        if (pointRadiusPixels <= 0)
-        {
-            pointRadiusPixels = AutoEstimatePointRadiusPixels(projected, pixelSize);
-        }
-
-        int widthPx  = (int)Math.Ceiling(widthWorld  / pixelSize) + 2 * paddingPixels;
-        int heightPx = (int)Math.Ceiling(heightWorld / pixelSize) + 2 * paddingPixels;
-
-        var mask = new bool[widthPx, heightPx];
-
-        // --- 3. Stamp each point as a filled disk of radius r ---
-        int r = Math.Max(1, pointRadiusPixels);
-
-        for (int i = 0; i < projected.Count; i++)
-        {
-            var pt = projected[i];
-
-            int cx = (int)Math.Round((pt.X - minX) / pixelSize) + paddingPixels;
-            // Flip Y so bitmap Y grows downward
-            int cy = (int)Math.Round((maxY - pt.Y) / pixelSize) + paddingPixels;
-
-            if (cx < 0 || cx >= widthPx || cy < 0 || cy >= heightPx)
-                continue;
-
-            for (int dy = -r; dy <= r; dy++)
-            {
-                int yy = cy + dy;
-                if (yy < 0 || yy >= heightPx) continue;
-
-                for (int dx = -r; dx <= r; dx++)
-                {
-                    int xx = cx + dx;
-                    if (xx < 0 || xx >= widthPx) continue;
-                    if (dx * dx + dy * dy > r * r) continue; // keep it circular
-
-                    mask[xx, yy] = true;
-                }
-            }
-        }
-
-        // --- 4. Write mask into an 8-bpp bitmap (white = material, black = void) ---
-        var bmp = new Bitmap(widthPx, heightPx, PixelFormat.Format8bppIndexed);
-        var pal = bmp.Palette;
-        for (int i = 0; i < 256; i++)
-            pal.Entries[i] = Color.FromArgb(i, i, i);
-        bmp.Palette = pal;
-
-        var rect = new Rectangle(0, 0, widthPx, heightPx);
-        var data = bmp.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format8bppIndexed);
-
-        unsafe
-        {
-            byte* basePtr = (byte*)data.Scan0;
-            int stride = data.Stride;
-
-            for (int y = 0; y < heightPx; y++)
-            {
-                byte* row = basePtr + y * stride;
-                for (int x = 0; x < widthPx; x++)
-                {
-                    row[x] = mask[x, y] ? (byte)255 : (byte)0;
-                }
-            }
-        }
-
-        bmp.UnlockBits(data);
-
-        return new ProjectionBitmapResult
-        {
-            Bitmap    = bmp,
-            MinX      = minX,
-            MaxX      = maxX,
-            MinY      = minY,
-            MaxY      = maxY,
-            PixelSize = pixelSize,
-            Padding   = paddingPixels
-        };
+        Cv2.Line(img,
+            new OpenCvSharp.Point(center.X, center.Y - size),
+            new OpenCvSharp.Point(center.X, center.Y + size),
+            color, thickness);
     }
 
     /// <summary>
-    /// Estimate a good point radius (in pixels) from the projected point spacing,
-    /// so neighboring disks overlap and close the gaps automatically.
+    /// Starting from a (possibly grayscale) bitmap where the voids are white after inversion,
+    /// run Connected Components, find rectangular/square blobs, and annotate each corner
+    /// with a cross. Returns an annotated bitmap.
     /// </summary>
-    private static int AutoEstimatePointRadiusPixels(
-        List<PointF> projected,
-        double pixelSize)
+    public static Bitmap AnnotateRectanglesWithCC(
+        Bitmap input,
+        int morphKernelSize = 3,
+        int minArea = 200,
+        double maxAspectRatio = 4.0)
     {
-        if (projected == null || projected.Count < 4)
-            return 1;
+        if (input == null) throw new ArgumentNullException(nameof(input));
 
-        double[] xs = projected.Select(p => (double)p.X).OrderBy(v => v).ToArray();
-        double[] ys = projected.Select(p => (double)p.Y).OrderBy(v => v).ToArray();
+        // --- 1. Convert to Mat ---
+        using var src = BitmapConverter.ToMat(input);
 
-        static double MedianPositiveDiff(double[] arr)
+        // Ensure we have a single-channel grayscale for thresholding
+        using var gray = new Mat();
+        if (src.Channels() == 1)
         {
-            var diffs = new List<double>();
-            for (int i = 1; i < arr.Length; i++)
-            {
-                double d = arr[i] - arr[i - 1];
-                if (d > 0) diffs.Add(d);
-            }
-            if (diffs.Count == 0) return 1.0;
-            diffs.Sort();
-            return diffs[diffs.Count / 2];
+            src.CopyTo(gray);
+        }
+        else
+        {
+            Cv2.CvtColor(src, gray, ColorConversionCodes.BGR2GRAY);
         }
 
-        double spacingX = MedianPositiveDiff(xs);
-        double spacingY = MedianPositiveDiff(ys);
-        double spacingWorld = Math.Min(spacingX, spacingY);
-        if (spacingWorld <= 0) spacingWorld = 1.0;
+        // --- 2. Threshold (holes => white, background => black) ---
+        using var bin = new Mat();
+        // Otsu tends to work well; you can change to a fixed threshold if needed
+        Cv2.Threshold(gray, bin, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
 
-        // Convert to pixel units. pixelSize is "world units per pixel".
-        double spacingPixels = spacingWorld / Math.Max(pixelSize, 1e-9);
+        // --- 3. Optional morphology to close gaps between points ---
+        if (morphKernelSize > 0)
+        {
+            using var kernel = Cv2.GetStructuringElement(
+                MorphShapes.Rect,
+                new OpenCvSharp.Size(morphKernelSize, morphKernelSize));
+            Cv2.MorphologyEx(bin, bin, MorphTypes.Close, kernel);
+        }
 
-        // Choose radius so neighboring discs overlap nicely.
-        double r = 0.6 * spacingPixels; // 0.5–0.7 works well
-        int radius = (int)Math.Ceiling(r);
+        // --- 4. Invert so "void region" is white (255), background is black (0) ---
+        using var inv = new Mat();
+        Cv2.BitwiseNot(bin, inv);
 
-        // Clamp to something reasonable
-        radius = Math.Max(1, Math.Min(radius, 10));
+        // --- 5. Connected Components on the inverted image ---
+        using var labels = new Mat();
+        using var stats = new Mat();
+        using var centroids = new Mat();
+        int nLabels = Cv2.ConnectedComponentsWithStats(
+            inv,
+            labels,
+            stats,
+            centroids,
+            PixelConnectivity.Connectivity8,
+            MatType.CV_32S);
 
-        return radius;
+        // --- 6. Prepare color image to draw on ---
+        using var color = new Mat();
+        if (src.Channels() == 1)
+            Cv2.CvtColor(src, color, ColorConversionCodes.GRAY2BGR);
+        else
+            src.CopyTo(color);
+
+        // --- 7. Loop over components (label 0 = background, skip it) ---
+        for (int label = 1; label < nLabels; label++)
+        {
+            int area = stats.Get<int>(label, (int)ConnectedComponentsTypes.Area);
+            if (area < minArea)
+                continue; // too small, probably noise
+
+            int left   = stats.Get<int>(label, (int)ConnectedComponentsTypes.Left);
+            int top    = stats.Get<int>(label, (int)ConnectedComponentsTypes.Top);
+            int width  = stats.Get<int>(label, (int)ConnectedComponentsTypes.Width);
+            int height = stats.Get<int>(label, (int)ConnectedComponentsTypes.Height);
+
+            if (width <= 0 || height <= 0)
+                continue;
+
+            double aspect = (double)Math.Max(width, height) / Math.Min(width, height);
+
+            // Rough "rectangular-ish / squareish" filter:
+            //   aspect close-ish to 1 (square) or not insanely elongated (rectangles).
+            if (aspect > maxAspectRatio)
+                continue;
+
+            // --- 8. Rectangle corners in image coordinates ---
+            var c0 = new Point(left, top);
+            var c1 = new Point(left + width - 1, top);
+            var c2 = new Point(left + width - 1, top + height - 1);
+            var c3 = new Point(left, top + height - 1);
+
+            // Draw rectangle outline (optional)
+            Cv2.Rectangle(color, new OpenCvSharp.Rect(left, top, width, height),
+                new Scalar(0, 255, 0), 2);
+
+            // Draw crosses at corners
+            DrawCross(color, c0, 6, new Scalar(0, 0, 255), 2);
+            DrawCross(color, c1, 6, new Scalar(0, 0, 255), 2);
+            DrawCross(color, c2, 6, new Scalar(0, 0, 255), 2);
+            DrawCross(color, c3, 6, new Scalar(0, 0, 255), 2);
+        }
+
+        // --- 9. Convert back to Bitmap ---
+        return BitmapConverter.ToBitmap(color);
     }
 }
