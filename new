@@ -1,123 +1,543 @@
-using System;
+﻿using System;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Linq;
 using System.Windows;
-using System.Windows.Media.Media3D;
-using HelixToolkit.Wpf;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Shapes;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+using static System.Net.Mime.MediaTypeNames;
+using System.Windows.Media.Imaging;
+using Image = System.Windows.Controls.Image;
+using Microsoft.Win32;
+using System.IO;
 
-public static class HitTestHelpers
+namespace ImgZooming
 {
-    /// <summary>
-    /// Tries to get either a "real" hit from Helix hit testing,
-    /// or, if nothing was hit, the nearest point in the given point cloud
-    /// along the ray from camera through mousePosition.
-    /// 
-    /// Returns true if it could return *something*.
-    /// </summary>
-    public static bool TryHitOrNearestPoint(
-        HelixViewport3D viewport,
-        Point mousePosition,
-        Point3DCollection pointCloud,
-        out Point3D result)
+    //public class ZoomBorder : Border
+    //{
+    //    private const double MinZoom = 1;
+    //    private const double MaxZoom = 50;
+    //    private UIElement child = null;
+    //    private Point origin;
+    //    private Point start;
+
+    //    private TranslateTransform GetTranslateTransform(UIElement element)
+    //    {
+    //        return (TranslateTransform)((TransformGroup)element.RenderTransform)
+    //          .Children.First(tr => tr is TranslateTransform);
+    //    }
+
+    //    private ScaleTransform GetScaleTransform(UIElement element)
+    //    {
+    //        return (ScaleTransform)((TransformGroup)element.RenderTransform)
+    //          .Children.First(tr => tr is ScaleTransform);
+    //    }
+
+    //    public override UIElement Child
+    //    {
+    //        get { return base.Child; }
+    //        set
+    //        {
+    //            if (value != null && value != this.Child)
+    //                this.Initialize(value);
+    //            base.Child = value;
+    //        }
+    //    }
+
+    //    public void Initialize(UIElement element)
+    //    {
+    //        this.child = element;
+    //        if (child != null)
+    //        {
+    //            TransformGroup group = new TransformGroup();
+    //            ScaleTransform st = new ScaleTransform();
+    //            group.Children.Add(st);
+    //            TranslateTransform tt = new TranslateTransform();
+    //            group.Children.Add(tt);
+    //            child.RenderTransform = group;
+    //            child.RenderTransformOrigin = new Point(0.0, 0.0);
+    //            this.MouseWheel += child_MouseWheel;
+    //            this.MouseLeftButtonDown += child_MouseLeftButtonDown;
+    //            this.MouseLeftButtonUp += child_MouseLeftButtonUp;
+    //            this.MouseMove += child_MouseMove;
+    //            this.PreviewMouseRightButtonDown += new MouseButtonEventHandler(
+    //              child_PreviewMouseRightButtonDown);
+    //        }
+    //    }
+
+    //    public void Reset()
+    //    {
+    //        if (child != null)
+    //        {
+    //            // reset zoom
+    //            var st = GetScaleTransform(child);
+    //            st.ScaleX = 1.0;
+    //            st.ScaleY = 1.0;
+
+    //            // reset pan
+    //            var tt = GetTranslateTransform(child);
+    //            tt.X = 0.0;
+    //            tt.Y = 0.0;
+    //        }
+    //    }
+
+    //    #region Child Events
+
+    //    private void child_MouseWheel(object sender, MouseWheelEventArgs e)
+    //    {
+    //        if (child != null)
+    //        {
+    //            var st = GetScaleTransform(child);
+    //            var tt = GetTranslateTransform(child);
+
+    //            double zoom = e.Delta > 0 ? .2 : -.2;
+    //            double newScaleX = st.ScaleX + zoom;
+    //            double newScaleY = st.ScaleY + zoom;
+
+    //            // Clamp the zoom levels
+    //            if (newScaleX < MinZoom || newScaleY < MinZoom || newScaleX > MaxZoom || newScaleY > MaxZoom)
+    //                return;
+
+    //            Point relative = e.GetPosition(child);
+    //            double absoluteX = relative.X * st.ScaleX + tt.X;
+    //            double absoluteY = relative.Y * st.ScaleY + tt.Y;
+
+    //            st.ScaleX = newScaleX;
+    //            st.ScaleY = newScaleY;
+
+    //            tt.X = absoluteX - relative.X * st.ScaleX;
+    //            tt.Y = absoluteY - relative.Y * st.ScaleY;
+    //        }
+    //    }
+
+    //    private void child_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    //    {
+    //        if (child != null)
+    //        {
+    //            var tt = GetTranslateTransform(child);
+    //            start = e.GetPosition(this);
+    //            origin = new Point(tt.X, tt.Y);
+    //            this.Cursor = Cursors.Hand;
+    //            child.CaptureMouse();
+    //        }
+    //    }
+
+    //    private void child_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    //    {
+    //        if (child != null)
+    //        {
+    //            child.ReleaseMouseCapture();
+    //            this.Cursor = Cursors.Arrow;
+    //        }
+    //    }
+
+    //    void child_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    //    {
+    //        this.Reset();
+    //    }
+
+    //    private void child_MouseMove(object sender, MouseEventArgs e)
+    //    {
+    //        if (child != null)
+    //        {
+    //            if (child.IsMouseCaptured)
+    //            {
+    //                var tt = GetTranslateTransform(child);
+    //                Vector v = start - e.GetPosition(this);
+    //                tt.X = origin.X - v.X;
+    //                tt.Y = origin.Y - v.Y;
+    //            }
+    //        }
+    //    }
+
+    //    #endregion
+    //}
+
+    //public class ZoomBorder : Border
+    //{
+    //    private UIElement? child;        // The user's content (e.g. an Image)
+    //    private Grid? container;         // A Grid that holds both 'child' and 'selectionRectangle'
+
+    //    // For drawing the selection rectangle on top of the content
+    //    private readonly Rectangle selectionRectangle;
+
+    //    // Coordinates in the Grid's (parent) space where user started dragging
+    //    private Point startParent;
+
+    //    private bool isSelecting = false;
+    //    private readonly Stopwatch doubleClickStopwatch = new Stopwatch(); // For detecting double-click
+
+    //    public ZoomBorder()
+    //    {
+    //        // Reusable selection rectangle
+    //        selectionRectangle = new Rectangle
+    //        {
+    //            Stroke = Brushes.Red,
+    //            StrokeThickness = 2,
+    //            Fill = Brushes.Transparent,
+    //            Visibility = Visibility.Collapsed,
+    //            HorizontalAlignment = HorizontalAlignment.Left,
+    //            VerticalAlignment = VerticalAlignment.Top
+    //        };
+
+    //        // Optional: reduce border thickness / padding to avoid offset
+    //        // this.BorderThickness = new Thickness(0);
+    //        // this.Padding         = new Thickness(0);
+    //    }
+
+    //    #region Transforms
+
+    //    private TranslateTransform GetTranslateTransform(UIElement element)
+    //    {
+    //        var group = (TransformGroup)element.RenderTransform;
+    //        return (TranslateTransform)group.Children.First(tr => tr is TranslateTransform);
+    //    }
+
+    //    private ScaleTransform GetScaleTransform(UIElement element)
+    //    {
+    //        var group = (TransformGroup)element.RenderTransform;
+    //        return (ScaleTransform)group.Children.First(tr => tr is ScaleTransform);
+    //    }
+
+    //    #endregion
+
+    //    #region Child Handling
+
+    //    public override UIElement Child
+    //    {
+    //        get => base.Child;
+    //        set
+    //        {
+    //            // If there was an old child, remove its event hookups
+    //            if (child != null)
+    //            {
+    //                this.MouseWheel -= OnMouseWheel;
+    //                this.MouseRightButtonDown -= OnMouseRightButtonDown;
+    //                this.MouseRightButtonUp -= OnMouseRightButtonUp;
+    //                this.MouseMove -= OnMouseMove;
+    //            }
+
+    //            // If we're assigning a new child, initialize it
+    //            if (value != null && value != child)
+    //            {
+    //                Initialize(value);
+    //            }
+
+    //            // Let the base store our container as its .Child
+    //            base.Child = container;
+    //        }
+    //    }
+
+    //    private void Initialize(UIElement newChild)
+    //    {
+    //        // Create or rebuild our Grid container
+    //        container = new Grid { Background = Brushes.Transparent };
+    //        container.Children.Clear();
+
+    //        // Make sure newChild is disconnected from any old parent
+    //        var oldParent = LogicalTreeHelper.GetParent(newChild) as FrameworkElement;
+    //        if (oldParent is Panel p) p.Children.Remove(newChild);
+    //        else if (oldParent is Decorator d) d.Child = null;
+    //        else if (oldParent is ContentControl cc) cc.Content = null;
+
+    //        // Ensure newChild has Scale + Translate transforms
+    //        var group = new TransformGroup();
+    //        group.Children.Add(new ScaleTransform());
+    //        group.Children.Add(new TranslateTransform());
+    //        newChild.RenderTransform = group;
+    //        newChild.RenderTransformOrigin = new Point(0.0, 0.0);
+
+    //        // Place the child and the selection rectangle into the Grid
+    //        container.Children.Add(newChild);
+    //        container.Children.Add(selectionRectangle);
+
+    //        // Hook up events to the ZoomBorder itself
+    //        this.MouseWheel += OnMouseWheel;
+    //        this.MouseRightButtonDown += OnMouseRightButtonDown;
+    //        this.MouseRightButtonUp += OnMouseRightButtonUp;
+    //        this.MouseMove += OnMouseMove;
+
+    //        // Track the real child
+    //        child = newChild;
+    //    }
+
+    //    #endregion
+
+    //    #region Zoom & Pan Reset
+
+    //    public void Reset()
+    //    {
+    //        if (child == null) return;
+
+    //        var st = GetScaleTransform(child);
+    //        st.ScaleX = 1.0;
+    //        st.ScaleY = 1.0;
+
+    //        var tt = GetTranslateTransform(child);
+    //        tt.X = 0.0;
+    //        tt.Y = 0.0;
+    //    }
+
+    //    #endregion
+
+    //    #region Mouse Events
+
+    //    private void OnMouseWheel(object sender, MouseWheelEventArgs e)
+    //    {
+    //        // Optional: implement mouse wheel zoom here.
+    //    }
+
+    //    private void OnMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    //    {
+    //        if (child == null) return;
+
+    //        // Check for double-click => reset
+    //        if (doubleClickStopwatch.IsRunning && doubleClickStopwatch.ElapsedMilliseconds < 500)
+    //        {
+    //            Reset();
+    //            doubleClickStopwatch.Reset();
+    //        }
+    //        else
+    //        {
+    //            doubleClickStopwatch.Restart();
+
+    //            // Begin a new selection
+    //            if (!isSelecting)
+    //            {
+    //                isSelecting = true;
+    //                this.CaptureMouse();
+
+    //                // Get the initial mouse position in the parent (Grid) coords
+    //                startParent = e.GetPosition(container!);
+
+    //                // Initialize the selection rectangle
+    //                selectionRectangle.Visibility = Visibility.Visible;
+    //                selectionRectangle.Margin = new Thickness(startParent.X, startParent.Y, 0, 0);
+    //                selectionRectangle.Width = 0;
+    //                selectionRectangle.Height = 0;
+    //            }
+    //        }
+
+    //        e.Handled = true;
+    //    }
+
+    //    private void OnMouseMove(object sender, MouseEventArgs e)
+    //    {
+    //        if (!isSelecting || child == null) return;
+
+    //        // Update selection rectangle in the parent's coordinate system
+    //        Point currentParent = e.GetPosition(container!);
+
+    //        double x = Math.Min(startParent.X, currentParent.X);
+    //        double y = Math.Min(startParent.Y, currentParent.Y);
+    //        double width = Math.Abs(currentParent.X - startParent.X);
+    //        double height = Math.Abs(currentParent.Y - startParent.Y);
+
+    //        selectionRectangle.Margin = new Thickness(x, y, 0, 0);
+    //        selectionRectangle.Width = width;
+    //        selectionRectangle.Height = height;
+    //    }
+
+    //    private void OnMouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    //    {
+    //        if (!isSelecting || child == null) return;
+
+    //        isSelecting = false;
+    //        this.ReleaseMouseCapture();
+
+    //        // Final corner in parent's (Grid) coordinate system
+    //        Point endParent = e.GetPosition(container!);
+
+    //        double rectWidth = Math.Abs(endParent.X - startParent.X);
+    //        double rectHeight = Math.Abs(endParent.Y - startParent.Y);
+
+    //        // Only proceed if user actually made a selection
+    //        if (rectWidth > 0 && rectHeight > 0)
+    //        {
+    //            // 1) Convert start/end from parent coords to child coords.
+    //            //    We'll use the child's current transform to the ZoomBorder, then invert it.
+    //            var transformToBorder = child.TransformToAncestor(this);
+    //            var inverse = transformToBorder.Inverse;
+
+    //            Point startChild = inverse.Transform(startParent);
+    //            Point endChild = inverse.Transform(endParent);
+
+    //            double selectionChildWidth = Math.Abs(endChild.X - startChild.X);
+    //            double selectionChildHeight = Math.Abs(endChild.Y - startChild.Y);
+
+    //            if (selectionChildWidth > 0 && selectionChildHeight > 0)
+    //            {
+    //                // 2) Figure out how much to scale so that bounding box fills the ZoomBorder
+    //                double scaleX = this.ActualWidth / selectionChildWidth;
+    //                double scaleY = this.ActualHeight / selectionChildHeight;
+    //                double scale = Math.Min(scaleX, scaleY);
+
+    //                var st = GetScaleTransform(child);
+    //                var tt = GetTranslateTransform(child);
+
+    //                // We will "multiply" the existing scale by 'scale'.
+    //                double oldScaleX = st.ScaleX;
+    //                double oldScaleY = st.ScaleY;
+
+    //                st.ScaleX = oldScaleX * scale;
+    //                st.ScaleY = oldScaleY * scale;
+
+    //                // 3) Center the selected region in the ZoomBorder
+    //                //    We want the midpoint of (startChild, endChild) to appear at
+    //                //    the midpoint of ZoomBorder => (ActualWidth/2, ActualHeight/2).
+
+    //                Point selectionCenterChild = new Point(
+    //                    (startChild.X + endChild.X) / 2.0,
+    //                    (startChild.Y + endChild.Y) / 2.0
+    //                );
+
+    //                // Transform that center to the *new* parent's coords after the updated scale
+    //                // Because we updated st.ScaleX/Y, let's re-grab the transform to get fresh values
+    //                var newTransformToBorder = child.TransformToAncestor(this);
+    //                Point centerInParent = newTransformToBorder.Transform(selectionCenterChild);
+
+    //                // We want centerInParent to be the center of ZoomBorder
+    //                double desiredX = this.ActualWidth / 2.0;
+    //                double desiredY = this.ActualHeight / 2.0;
+
+    //                double offsetX = centerInParent.X - desiredX;
+    //                double offsetY = centerInParent.Y - desiredY;
+
+    //                // Shift in the opposite direction
+    //                tt.X -= offsetX;
+    //                tt.Y -= offsetY;
+    //            }
+    //        }
+
+    //        // Hide the selection rectangle
+    //        selectionRectangle.Visibility = Visibility.Collapsed;
+    //        e.Handled = true;
+    //    }
+
+    //    #endregion
+    //}
+    public class ZoomBorder : Border, INotifyPropertyChanged
     {
-        // 1) First try the normal Helix hit test
-        var hits = viewport.FindHits(mousePosition);
-        if (hits != null && hits.Count > 0)
-        {
-            // closest hit (smallest distance)
-            var nearestHit = hits.OrderBy(h => h.Distance).First();
-            result = nearestHit.PointHit;
-            return true;
-        }
+        private UIElement? child;       // The user's content (e.g. an Image)
+        private Grid? container;        // Holds both 'child' and 'selectionRectangle'
 
-        // 2) If no visual hit: build a ray from camera through mouse
-        Point3D rayOrigin;
-        Vector3D rayDirection;
-        if (!Viewport3DHelper.Point2DToRay3D(
-                viewport.Viewport,
-                mousePosition,
-                out rayOrigin,
-                out rayDirection))
-        {
-            // If we can't even get a ray, fallback to "nearest point to camera"
-            if (pointCloud == null || pointCloud.Count == 0)
-            {
-                result = new Point3D();
-                return false;
-            }
+        // For drawing the selection rectangle on top of 'child'
+        private readonly Rectangle selectionRectangle;
 
-            double bestD2 = double.MaxValue;
-            Point3D best = new Point3D();
-            foreach (var p in pointCloud)
+        private readonly Rectangle focusRec;
+        // Where the user started dragging in the Grid's coordinate system
+        private Point startParent;
+
+        private bool isDragging = false;
+        private Point dragStartPoint;    // Mouse position when drag started
+        private double originX, originY; // Where the translateTransform was at drag start
+
+        // The bounding box of the child (in this ZoomBorder's coordinates)
+        // at the moment the drag begins
+        private Rect childBoundsStart;
+
+        // The maximum offsets we allow in each direction
+        // relative to originX/originY
+        private double maxLeftDrag = 0;
+        private double maxRightDrag = 0;
+        private double maxUpDrag = 0;
+        private double maxDownDrag = 0;
+
+
+        private bool isSelecting = false;
+       
+        private readonly Stopwatch doubleClickStopwatch = new Stopwatch(); // Detects double‐click
+
+        private Point currentMousePosition;
+
+        public event PropertyChangedEventHandler PropertyChanged;
+
+        public Point CurrentMousePosition
+        {
+            get => currentMousePosition;
+            set
             {
-                double d2 = (p - rayOrigin).LengthSquared;
-                if (d2 < bestD2)
+                if (currentMousePosition != value)
                 {
-                    bestD2 = d2;
-                    best = p;
+                    currentMousePosition = value;
+                    OnPropertyChanged();
                 }
             }
-
-            result = best;
-            return true;
         }
 
-        if (pointCloud == null || pointCloud.Count == 0)
+        protected void OnPropertyChanged([CallerMemberName] string propertyName = null)
         {
-            result = new Point3D();
-            return false;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         }
 
-        // Normalize direction for safety
-        rayDirection.Normalize();
-        double dirLen2 = rayDirection.LengthSquared;
-
-        // 3) Find nearest point in the cloud to the ray
-        bool found = false;
-        double bestRayDist2 = double.MaxValue;
-        Point3D bestPoint = new Point3D();
-
-        foreach (var p in pointCloud)
+        public ZoomBorder()
         {
-            Vector3D w = p - rayOrigin;
-
-            // parameter t along the ray (projection of w onto ray direction)
-            double t = Vector3D.DotProduct(w, rayDirection) / dirLen2;
-
-            if (t <= 0)
+            // We'll reuse this rectangle
+            selectionRectangle = new Rectangle
             {
-                // behind the camera, skip it
-                continue;
-            }
+                Stroke = Brushes.Red,
+                StrokeThickness = 2,
+                Fill = Brushes.Transparent,
+                Visibility = Visibility.Collapsed,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top
+            };
 
-            Point3D proj = rayOrigin + t * rayDirection;
-            double d2 = (p - proj).LengthSquared;
-
-            if (d2 < bestRayDist2)
+            focusRec = new Rectangle
             {
-                bestRayDist2 = d2;
-                bestPoint = p;
-                found = true;
-            }
+                Stroke = Brushes.Green,
+                StrokeThickness = 2,
+                Fill = Brushes.Transparent,
+                Visibility = Visibility.Collapsed,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top
+            };
+
+            // (Optional) If you have a thick border or padding, it can visually shift things.
+            // this.BorderThickness = new Thickness(0);
+            // this.Padding         = new Thickness(0);
         }
 
-        // 4) If all points were behind camera (or something weird),
-        //    fall back to plain nearest in 3D
-        if (!found)
+        #region Transforms
+
+        private TranslateTransform GetTranslateTransform(UIElement element)
         {
-            double bestD2 = double.MaxValue;
-            foreach (var p in pointCloud)
+            var group = (TransformGroup)element.RenderTransform;
+            return (TranslateTransform)group.Children.First(tr => tr is TranslateTransform);
+        }
+
+        private ScaleTransform GetScaleTransform(UIElement element)
+        {
+            var group = (TransformGroup)element.RenderTransform;
+            return (ScaleTransform)group.Children.First(tr => tr is ScaleTransform);
+        }
+
+        #endregion
+
+        #region Child Handling
+
+        public override UIElement Child
+        {
+            get => base.Child;
+            set
             {
-                double d2 = (p - rayOrigin).LengthSquared;
-                if (d2 < bestD2)
+                // Remove old event hookups if we had a previous child
+                if (child != null)
                 {
-                    bestD2 = d2;
-                    bestPoint = p;
+                    this.MouseWheel -= OnMouseWheel;
+                    this.MouseRightButtonDown -= OnMouseRightButtonDown;
+                    this.MouseRightButtonUp -= OnMouseRightButtonUp;
+                    this.MouseMove -= OnMouseMove;
                 }
-            }
-            found = true;
-        }
 
-        result = bestPoint;
-        return found;
-    }
-}
+                // If we have a new child, initialize it
+                if (value != null && value != child)
+                {
+                    Initialize(value);
+                }
+
+                // Let the base store our 
