@@ -1,209 +1,174 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
-using OpenCvSharp;
-using OpenCvSharp.Extensions;
+using System.Drawing.Imaging;
+using System.Linq;
+using System.Windows.Media.Media3D;
 
-public static class DogboneDetector
+public static class BmpHelper
 {
+    // Assume you already have:
+    //  - PlaneBasis / PlaneFitResult
+    //  - ProjectPointToPlane2D(Point3D, PlaneBasis)
+    //  - ProjectionBitmapResult class (Bitmap + bounds etc.)
+
     /// <summary>
-    /// Detect the large rectangular/square void surrounded by holes and
-    /// the "dogbone" (mouse-ear) corner using OpenCV,
-    /// then annotate the rectangle and the opposite corner.
-    /// 
-    /// Assumes: holes are WHITE in the input bitmap, background is dark.
+    /// Project a 3D point cloud onto a plane and rasterize to a bitmap.
+    /// White pixels represent “material”, black pixels are voids.
+    /// The point radius is chosen automatically from point spacing
+    /// if pointRadiusPixels <= 0.
     /// </summary>
-    /// <param name="input">Input bitmap (projection from point cloud).</param>
-    /// <param name="dogboneCorner">Output: corner with extra circular cut.</param>
-    /// <param name="oppositeCorner">Output: corner diagonally opposite the dogbone.</param>
-    /// <param name="holeThreshold">
-    /// Intensity threshold used to binarize holes (0–255).
-    /// Pixels ≥ threshold become "hole" (white) in the binary mask.
-    /// </param>
-    /// <param name="morphKernelSize">
-    /// Size of the morphological opening kernel used to clean noise (set 0 to skip).
-    /// </param>
-    /// <param name="minVoidAreaFraction">
-    /// Minimum fraction of image area a void must have to be considered (e.g. 0.05 = 5%).
-    /// </param>
-    /// <param name="cornerPatchRadius">
-    /// Half-size (in pixels) of the square patch around each corner used
-    /// to measure "hole density" for dogbone detection.
-    /// </param>
-    /// <returns>Annotated bitmap. If detection fails, a copy of the input is returned.</returns>
-    public static Bitmap AnnotateBigRectVoidWithDogboneCv(
-        Bitmap input,
-        out Point2f dogboneCorner,
-        out Point2f oppositeCorner,
-        double holeThreshold = 64,
-        int morphKernelSize = 3,
-        double minVoidAreaFraction = 0.05,
-        int cornerPatchRadius = 20)
+    public static ProjectionBitmapResult ProjectToBitmap(
+        Point3DCollection points,
+        PlaneBasis plane,
+        double pixelSize = 1.0,       // 1:1 if your projected units are "pixel-like"
+        int paddingPixels = 4,
+        int pointRadiusPixels = 0      // <= 0 => auto
+    )
     {
-        dogboneCorner = new Point2f();
-        oppositeCorner = new Point2f();
+        if (points == null || points.Count == 0)
+            return null;
 
-        if (input == null)
-            throw new ArgumentNullException(nameof(input));
-
-        // --- 0. Convert Bitmap -> Mat ---
-        Mat src = BitmapConverter.ToMat(input);
-
-        // Ensure we have something we can draw color on later
-        Mat color;
-        if (src.Channels() == 1)
+        // --- 1. Project to plane (2D) ---
+        var projected = new List<PointF>(points.Count);
+        foreach (var p in points)
         {
-            Cv2.CvtColor(src, color, ColorConversionCodes.GRAY2BGR);
-        }
-        else if (src.Channels() == 3)
-        {
-            color = src.Clone();
-        }
-        else if (src.Channels() == 4)
-        {
-            Cv2.CvtColor(src, color, ColorConversionCodes.BGRA2BGR);
-        }
-        else
-        {
-            throw new InvalidOperationException("Unsupported channel count in input image.");
+            var q = PointCloudProcessing.ProjectPointToPlane2D(p, plane); // returns System.Windows.Point
+            projected.Add(new PointF((float)q.X, (float)q.Y));
         }
 
-        // --- 1. Make a binary mask where HOLES are white ---
-        Mat gray = new Mat();
-        if (src.Channels() == 3)
-            Cv2.CvtColor(src, gray, ColorConversionCodes.BGR2GRAY);
-        else if (src.Channels() == 4)
-            Cv2.CvtColor(src, gray, ColorConversionCodes.BGRA2GRAY);
-        else
-            gray = src.Clone();
+        double minX = projected.Min(pt => pt.X);
+        double maxX = projected.Max(pt => pt.X);
+        double minY = projected.Min(pt => pt.Y);
+        double maxY = projected.Max(pt => pt.Y);
 
-        Mat bin = new Mat();
-        Cv2.Threshold(gray, bin, holeThreshold, 255, ThresholdTypes.Binary);
+        double widthWorld  = maxX - minX;
+        double heightWorld = maxY - minY;
+        if (widthWorld <= 0 || heightWorld <= 0)
+            throw new InvalidOperationException("Degenerate projection bounds.");
 
-        // Optional: small opening to clean noise
-        if (morphKernelSize > 0)
+        // --- 2. Auto-estimate radius if requested ---
+        if (pointRadiusPixels <= 0)
         {
-            Mat kernel = Cv2.GetStructuringElement(
-                MorphShapes.Rect,
-                new OpenCvSharp.Size(morphKernelSize, morphKernelSize));
-            Cv2.MorphologyEx(bin, bin, MorphTypes.Open, kernel);
+            pointRadiusPixels = AutoEstimatePointRadiusPixels(projected, pixelSize);
         }
 
-        // --- 2. Invert: central VOID becomes white ---
-        Mat inv = new Mat();
-        Cv2.BitwiseNot(bin, inv);
+        int widthPx  = (int)Math.Ceiling(widthWorld  / pixelSize) + 2 * paddingPixels;
+        int heightPx = (int)Math.Ceiling(heightWorld / pixelSize) + 2 * paddingPixels;
 
-        // --- 3. Find external contours on inverted image ---
-        Cv2.FindContours(
-            inv,
-            out OpenCvSharp.Point[][] contours,
-            out HierarchyIndex[] hierarchy,
-            RetrievalModes.External,
-            ContourApproximationModes.ApproxSimple);
+        var mask = new bool[widthPx, heightPx];
 
-        if (contours == null || contours.Length == 0)
-            return BitmapConverter.ToBitmap(color); // nothing found
+        // --- 3. Stamp each point as a filled disk of radius r ---
+        int r = Math.Max(1, pointRadiusPixels);
 
-        double imgArea = inv.Rows * inv.Cols;
-        double minVoidArea = imgArea * minVoidAreaFraction;
-
-        RotatedRect? bestRect = null;
-        double bestScore = double.NegativeInfinity;
-
-        // Choose the large, central-ish rectangular void
-        foreach (var contour in contours)
+        for (int i = 0; i < projected.Count; i++)
         {
-            if (contour.Length < 4)
+            var pt = projected[i];
+
+            int cx = (int)Math.Round((pt.X - minX) / pixelSize) + paddingPixels;
+            // Flip Y so bitmap Y grows downward
+            int cy = (int)Math.Round((maxY - pt.Y) / pixelSize) + paddingPixels;
+
+            if (cx < 0 || cx >= widthPx || cy < 0 || cy >= heightPx)
                 continue;
 
-            RotatedRect rect = Cv2.MinAreaRect(contour);
-            double area = rect.Size.Width * rect.Size.Height;
-            if (area < minVoidArea)
-                continue;
-
-            // Penalize distance from image center
-            var c = rect.Center;
-            double dx = c.X - inv.Cols / 2.0;
-            double dy = c.Y - inv.Rows / 2.0;
-            double dist2 = dx * dx + dy * dy;
-
-            double score = area / (1.0 + 0.001 * dist2);
-            if (score > bestScore)
+            for (int dy = -r; dy <= r; dy++)
             {
-                bestScore = score;
-                bestRect = rect;
+                int yy = cy + dy;
+                if (yy < 0 || yy >= heightPx) continue;
+
+                for (int dx = -r; dx <= r; dx++)
+                {
+                    int xx = cx + dx;
+                    if (xx < 0 || xx >= widthPx) continue;
+                    if (dx * dx + dy * dy > r * r) continue; // keep it circular
+
+                    mask[xx, yy] = true;
+                }
             }
         }
 
-        if (bestRect == null)
-            return BitmapConverter.ToBitmap(color); // no suitable void
+        // --- 4. Write mask into an 8-bpp bitmap (white = material, black = void) ---
+        var bmp = new Bitmap(widthPx, heightPx, PixelFormat.Format8bppIndexed);
+        var pal = bmp.Palette;
+        for (int i = 0; i < 256; i++)
+            pal.Entries[i] = Color.FromArgb(i, i, i);
+        bmp.Palette = pal;
 
-        RotatedRect voidRect = bestRect.Value;
-        Point2f[] rectCorners = voidRect.Points(); // 4 corners in some order
+        var rect = new Rectangle(0, 0, widthPx, heightPx);
+        var data = bmp.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format8bppIndexed);
 
-        // --- 4. Find DOGBONE corner by local hole density around each corner ---
-        double bestHoleFrac = double.NegativeInfinity;
-        Point2f bestDogbone = rectCorners[0];
-
-        foreach (var c in rectCorners)
+        unsafe
         {
-            int cx = (int)Math.Round(c.X);
-            int cy = (int)Math.Round(c.Y);
+            byte* basePtr = (byte*)data.Scan0;
+            int stride = data.Stride;
 
-            int x0 = Math.Max(0, cx - cornerPatchRadius);
-            int y0 = Math.Max(0, cy - cornerPatchRadius);
-            int x1 = Math.Min(bin.Cols - 1, cx + cornerPatchRadius);
-            int y1 = Math.Min(bin.Rows - 1, cy + cornerPatchRadius);
-
-            if (x1 <= x0 || y1 <= y0)
-                continue;
-
-            var roi = new Mat(bin, new Rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1));
-            double white = Cv2.CountNonZero(roi);
-            double frac = white / roi.Total();   // fraction of hole pixels
-
-            if (frac > bestHoleFrac)
+            for (int y = 0; y < heightPx; y++)
             {
-                bestHoleFrac = frac;
-                bestDogbone = c;
+                byte* row = basePtr + y * stride;
+                for (int x = 0; x < widthPx; x++)
+                {
+                    row[x] = mask[x, y] ? (byte)255 : (byte)0;
+                }
             }
         }
 
-        dogboneCorner = bestDogbone;
+        bmp.UnlockBits(data);
 
-        // --- 5. Opposite corner: farthest one from dogbone ---
-        Point2f bestOpp = rectCorners[0];
-        double maxD2 = double.NegativeInfinity;
-
-        foreach (var c in rectCorners)
+        return new ProjectionBitmapResult
         {
-            double dx = c.X - dogboneCorner.X;
-            double dy = c.Y - dogboneCorner.Y;
-            double d2 = dx * dx + dy * dy;
-            if (d2 > maxD2)
+            Bitmap    = bmp,
+            MinX      = minX,
+            MaxX      = maxX,
+            MinY      = minY,
+            MaxY      = maxY,
+            PixelSize = pixelSize,
+            Padding   = paddingPixels
+        };
+    }
+
+    /// <summary>
+    /// Estimate a good point radius (in pixels) from the projected point spacing,
+    /// so neighboring disks overlap and close the gaps automatically.
+    /// </summary>
+    private static int AutoEstimatePointRadiusPixels(
+        List<PointF> projected,
+        double pixelSize)
+    {
+        if (projected == null || projected.Count < 4)
+            return 1;
+
+        double[] xs = projected.Select(p => (double)p.X).OrderBy(v => v).ToArray();
+        double[] ys = projected.Select(p => (double)p.Y).OrderBy(v => v).ToArray();
+
+        static double MedianPositiveDiff(double[] arr)
+        {
+            var diffs = new List<double>();
+            for (int i = 1; i < arr.Length; i++)
             {
-                maxD2 = d2;
-                bestOpp = c;
+                double d = arr[i] - arr[i - 1];
+                if (d > 0) diffs.Add(d);
             }
+            if (diffs.Count == 0) return 1.0;
+            diffs.Sort();
+            return diffs[diffs.Count / 2];
         }
 
-        oppositeCorner = bestOpp;
+        double spacingX = MedianPositiveDiff(xs);
+        double spacingY = MedianPositiveDiff(ys);
+        double spacingWorld = Math.Min(spacingX, spacingY);
+        if (spacingWorld <= 0) spacingWorld = 1.0;
 
-        // --- 6. Draw annotation on 'color' Mat ---
-        // Draw rectangle
-        for (int i = 0; i < 4; i++)
-        {
-            Point2f p0 = rectCorners[i];
-            Point2f p1 = rectCorners[(i + 1) % 4];
-            Cv2.Line(color, (Point)p0, (Point)p1, new Scalar(0, 255, 0), 2);  // green
-        }
+        // Convert to pixel units. pixelSize is "world units per pixel".
+        double spacingPixels = spacingWorld / Math.Max(pixelSize, 1e-9);
 
-        // Dogbone corner (red)
-        Cv2.Circle(color, (Point)dogboneCorner, 6, new Scalar(0, 0, 255), -1);
+        // Choose radius so neighboring discs overlap nicely.
+        double r = 0.6 * spacingPixels; // 0.5–0.7 works well
+        int radius = (int)Math.Ceiling(r);
 
-        // Opposite corner (blue)
-        Cv2.Circle(color, (Point)oppositeCorner, 6, new Scalar(255, 0, 0), -1);
+        // Clamp to something reasonable
+        radius = Math.Max(1, Math.Min(radius, 10));
 
-        // --- 7. Back to Bitmap ---
-        return BitmapConverter.ToBitmap(color);
+        return radius;
     }
 }
