@@ -114,3 +114,12 @@ public static class RectWallsFromContour
         return a + (b - a) * t;
     }
 }
+
+
+
+var walls = RectWallsFromContour.FindRectangleWalls(contour, clipPercent: 2.0);
+// walls[0]=left, walls[1]=right, walls[2]=top, walls[3]=bottom
+Cv2.Line(img, (Point)walls[0].A, (Point)walls[0].B, Scalar.Lime, 2);
+Cv2.Line(img, (Point)walls[1].A, (Point)walls[1].B, Scalar.Lime, 2);
+Cv2.Line(img, (Point)walls[2].A, (Point)walls[2].B, Scalar.Lime, 2);
+Cv2.Line(img, (Point)walls[3].A, (Point)walls[3].B, Scalar.Lime, 2);
