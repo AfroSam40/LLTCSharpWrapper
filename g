@@ -1,143 +1,139 @@
-// ---- Fit lines to the four sides of `contour` and draw lines + corner crosses ----
+// ---- Fit lines to 4 sides of `contour` and draw lines + corner crosses ----
 if (contour != null && contour.Length >= 4)
 {
-    // Convert contour to float points
     var pts = contour.Select(p => new OpenCvSharp.Point2f(p.X, p.Y)).ToList();
 
-    // Bounding box of contour
+    // Bounding box
     float minX = pts.Min(p => p.X);
     float maxX = pts.Max(p => p.X);
     float minY = pts.Min(p => p.Y);
     float maxY = pts.Max(p => p.Y);
 
-    // Band thickness (how far from each edge we still consider "on that side")
-    float band = 0.05f * Math.Max(maxX - minX, maxY - minY); // 5% of size
-    int   minSidePts = 10;
+    float size   = Math.Max(maxX - minX, maxY - minY);
+    float band   = 0.05f * size;   // 5% of size as side band
+    int   minPts = 10;
 
     var bottomPts = new List<OpenCvSharp.Point2f>();
     var topPts    = new List<OpenCvSharp.Point2f>();
     var leftPts   = new List<OpenCvSharp.Point2f>();
     var rightPts  = new List<OpenCvSharp.Point2f>();
 
-    // Classify contour points to four sides based on proximity to bbox edges
+    // classify contour points to sides by proximity to bbox edges
     foreach (var p in pts)
     {
-        if (Math.Abs(p.Y - maxY) <= band) bottomPts.Add(p); // bottom edge
-        if (Math.Abs(p.Y - minY) <= band) topPts.Add(p);    // top edge
-        if (Math.Abs(p.X - minX) <= band) leftPts.Add(p);   // left edge
-        if (Math.Abs(p.X - maxX) <= band) rightPts.Add(p);  // right edge
+        if (Math.Abs(p.Y - maxY) <= band) bottomPts.Add(p); // bottom
+        if (Math.Abs(p.Y - minY) <= band) topPts.Add(p);    // top
+        if (Math.Abs(p.X - minX) <= band) leftPts.Add(p);   // left
+        if (Math.Abs(p.X - maxX) <= band) rightPts.Add(p);  // right
     }
 
-    // Fit lines: each Vec4f is (vx, vy, x0, y0)
-    OpenCvSharp.Vec4f lineBottom = new OpenCvSharp.Vec4f(0, 0, 0, 0);
-    OpenCvSharp.Vec4f lineTop    = new OpenCvSharp.Vec4f(0, 0, 0, 0);
-    OpenCvSharp.Vec4f lineLeft   = new OpenCvSharp.Vec4f(0, 0, 0, 0);
-    OpenCvSharp.Vec4f lineRight  = new OpenCvSharp.Vec4f(0, 0, 0, 0);
+    bool hasBottom = bottomPts.Count >= minPts;
+    bool hasTop    = topPts.Count    >= minPts;
+    bool hasLeft   = leftPts.Count   >= minPts;
+    bool hasRight  = rightPts.Count  >= minPts;
 
-    bool hasBottom = bottomPts.Count >= minSidePts;
-    bool hasTop    = topPts.Count    >= minSidePts;
-    bool hasLeft   = leftPts.Count   >= minSidePts;
-    bool hasRight  = rightPts.Count  >= minSidePts;
+    OpenCvSharp.Line2D bottomLine = default;
+    OpenCvSharp.Line2D topLine    = default;
+    OpenCvSharp.Line2D leftLine   = default;
+    OpenCvSharp.Line2D rightLine  = default;
 
     if (hasBottom)
-        lineBottom = OpenCvSharp.Cv2.FitLine(
-            bottomPts, OpenCvSharp.DistanceTypes.L2, 0, 0.01, 0.01);
+        bottomLine = OpenCvSharp.Cv2.FitLine(bottomPts, OpenCvSharp.DistanceTypes.L2, 0, 0.01, 0.01);
     if (hasTop)
-        lineTop = OpenCvSharp.Cv2.FitLine(
-            topPts, OpenCvSharp.DistanceTypes.L2, 0, 0.01, 0.01);
+        topLine    = OpenCvSharp.Cv2.FitLine(topPts,    OpenCvSharp.DistanceTypes.L2, 0, 0.01, 0.01);
     if (hasLeft)
-        lineLeft = OpenCvSharp.Cv2.FitLine(
-            leftPts, OpenCvSharp.DistanceTypes.L2, 0, 0.01, 0.01);
+        leftLine   = OpenCvSharp.Cv2.FitLine(leftPts,   OpenCvSharp.DistanceTypes.L2, 0, 0.01, 0.01);
     if (hasRight)
-        lineRight = OpenCvSharp.Cv2.FitLine(
-            rightPts, OpenCvSharp.DistanceTypes.L2, 0, 0.01, 0.01);
+        rightLine  = OpenCvSharp.Cv2.FitLine(rightPts,  OpenCvSharp.DistanceTypes.L2, 0, 0.01, 0.01);
 
     int imgW = flines.Cols;
     int imgH = flines.Rows;
-    float L = (float)Math.Sqrt(imgW * imgW + imgH * imgH);
+    float L  = (float)Math.Sqrt(imgW * imgW + imgH * imgH);
 
-    // Draw a line helper (inline, no extra methods)
-    Action<OpenCvSharp.Vec4f> drawLine = line =>
+    Func<OpenCvSharp.Line2D, bool> isValid = line =>
     {
-        if (line.Item0 == 0 && line.Item1 == 0 && line.Item2 == 0 && line.Item3 == 0)
-            return;
-
-        float vx = line.Item0;
-        float vy = line.Item1;
-        float x0 = line.Item2;
-        float y0 = line.Item3;
-
-        var p1 = new OpenCvSharp.Point(
-            (int)Math.Round(x0 - vx * L),
-            (int)Math.Round(y0 - vy * L));
-        var p2 = new OpenCvSharp.Point(
-            (int)Math.Round(x0 + vx * L),
-            (int)Math.Round(y0 + vy * L));
-
-        OpenCvSharp.Cv2.Line(
-            flines,
-            p1,
-            p2,
-            new OpenCvSharp.Scalar(0, 255, 0), // green
-            2);
+        float dx = line.P2.X - line.P1.X;
+        float dy = line.P2.Y - line.P1.Y;
+        return Math.Abs(dx) + Math.Abs(dy) > 1e-6f;
     };
 
-    // Draw the four side lines
-    if (hasBottom) drawLine(lineBottom);
-    if (hasTop)    drawLine(lineTop);
-    if (hasLeft)   drawLine(lineLeft);
-    if (hasRight)  drawLine(lineRight);
+    // draw (almost) infinite line across the image
+    Action<OpenCvSharp.Line2D> drawLine = line =>
+    {
+        if (!isValid(line)) return;
 
-    // Compute intersections (corners)
-    var corners = new List<OpenCvSharp.Point>();
+        float dx  = line.P2.X - line.P1.X;
+        float dy  = line.P2.Y - line.P1.Y;
+        float len = (float)Math.Sqrt(dx * dx + dy * dy);
+        if (len < 1e-6f) return;
 
-    // inline intersection for pairs
-    Action<OpenCvSharp.Vec4f, OpenCvSharp.Vec4f> addIntersection =
+        float vx = dx / len;
+        float vy = dy / len;
+        var p0   = line.P1;
+
+        var p1 = new OpenCvSharp.Point(
+            (int)Math.Round(p0.X - vx * L),
+            (int)Math.Round(p0.Y - vy * L));
+        var p2 = new OpenCvSharp.Point(
+            (int)Math.Round(p0.X + vx * L),
+            (int)Math.Round(p0.Y + vy * L));
+
+        OpenCvSharp.Cv2.Line(flines, p1, p2, new OpenCvSharp.Scalar(0, 255, 0), 2);
+    };
+
+    if (hasBottom) drawLine(bottomLine);
+    if (hasTop)    drawLine(topLine);
+    if (hasLeft)   drawLine(leftLine);
+    if (hasRight)  drawLine(rightLine);
+
+    // intersection of two infinite Line2D's
+    Func<OpenCvSharp.Line2D, OpenCvSharp.Line2D, OpenCvSharp.Point2f?> intersect =
         (l1, l2) =>
         {
-            if ((l1.Item0 == 0 && l1.Item1 == 0 && l1.Item2 == 0 && l1.Item3 == 0) ||
-                (l2.Item0 == 0 && l2.Item1 == 0 && l2.Item2 == 0 && l2.Item3 == 0))
-                return;
+            if (!isValid(l1) || !isValid(l2)) return null;
 
-            float vx1 = l1.Item0, vy1 = l1.Item1, x01 = l1.Item2, y01 = l1.Item3;
-            float vx2 = l2.Item0, vy2 = l2.Item1, x02 = l2.Item2, y02 = l2.Item3;
+            var p1 = new OpenCvSharp.Point2f(l1.P1.X, l1.P1.Y);
+            var d1 = new OpenCvSharp.Point2f(l1.P2.X - l1.P1.X, l1.P2.Y - l1.P1.Y);
 
-            double a1 = vy1, b1 = -vx1, c1 = -vy1 * x01 + vx1 * y01;
-            double a2 = vy2, b2 = -vx2, c2 = -vy2 * x02 + vx2 * y02;
+            var p2 = new OpenCvSharp.Point2f(l2.P1.X, l2.P1.Y);
+            var d2 = new OpenCvSharp.Point2f(l2.P2.X - l2.P1.X, l2.P2.Y - l2.P1.Y);
 
-            double D = a1 * b2 - a2 * b1;
-            if (Math.Abs(D) < 1e-6) return; // almost parallel
+            float det = d1.X * d2.Y - d1.Y * d2.X;
+            if (Math.Abs(det) < 1e-6f) return null; // parallel
 
-            double x = (b1 * c2 - b2 * c1) / D;
-            double y = (c1 * a2 - c2 * a1) / D;
-
-            corners.Add(new OpenCvSharp.Point(
-                (int)Math.Round(x),
-                (int)Math.Round(y)));
+            float t = ((p2.X - p1.X) * d2.Y - (p2.Y - p1.Y) * d2.X) / det;
+            return new OpenCvSharp.Point2f(p1.X + t * d1.X, p1.Y + t * d1.Y);
         };
 
-    if (hasBottom && hasLeft)  addIntersection(lineBottom, lineLeft);   // bottom-left
-    if (hasBottom && hasRight) addIntersection(lineBottom, lineRight);  // bottom-right
-    if (hasTop && hasLeft)     addIntersection(lineTop, lineLeft);      // top-left
-    if (hasTop && hasRight)    addIntersection(lineTop, lineRight);     // top-right
+    var corners = new System.Collections.Generic.List<OpenCvSharp.Point>();
 
-    // Draw crosses at each corner
+    var cBL = (hasBottom && hasLeft)  ? intersect(bottomLine, leftLine)  : null; // bottom-left
+    var cBR = (hasBottom && hasRight) ? intersect(bottomLine, rightLine) : null; // bottom-right
+    var cTL = (hasTop && hasLeft)     ? intersect(topLine,    leftLine)  : null; // top-left
+    var cTR = (hasTop && hasRight)    ? intersect(topLine,    rightLine) : null; // top-right
+
+    if (cBL.HasValue) corners.Add(new OpenCvSharp.Point((int)Math.Round(cBL.Value.X), (int)Math.Round(cBL.Value.Y)));
+    if (cBR.HasValue) corners.Add(new OpenCvSharp.Point((int)Math.Round(cBR.Value.X), (int)Math.Round(cBR.Value.Y)));
+    if (cTL.HasValue) corners.Add(new OpenCvSharp.Point((int)Math.Round(cTL.Value.X), (int)Math.Round(cTL.Value.Y)));
+    if (cTR.HasValue) corners.Add(new OpenCvSharp.Point((int)Math.Round(cTR.Value.X), (int)Math.Round(cTR.Value.Y)));
+
+    // Draw crosses at corners
     int crossHalf = 10;
     foreach (var c in corners)
     {
-        // horizontal
         OpenCvSharp.Cv2.Line(
             flines,
             new OpenCvSharp.Point(c.X - crossHalf, c.Y),
             new OpenCvSharp.Point(c.X + crossHalf, c.Y),
-            new OpenCvSharp.Scalar(0, 0, 255), 2); // red
+            new OpenCvSharp.Scalar(0, 0, 255),
+            2);
 
-        // vertical
         OpenCvSharp.Cv2.Line(
             flines,
             new OpenCvSharp.Point(c.X, c.Y - crossHalf),
             new OpenCvSharp.Point(c.X, c.Y + crossHalf),
-            new OpenCvSharp.Scalar(0, 0, 255), 2);
+            new OpenCvSharp.Scalar(0, 0, 255),
+            2);
     }
 }
 // ---- end block ----
