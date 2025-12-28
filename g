@@ -1,126 +1,187 @@
+using System;
+using System.Collections.Generic;
 using OpenCvSharp;
-using System.Drawing;
-using Bitmap = System.Drawing.Bitmap;
 
-public static class RectAnnotator
+public static class DogboneRectHelper
 {
-    private static void DrawCross(Mat img, Point center, int size, Scalar color, int thickness = 2)
+    /// <summary>
+    /// From a contour enclosing a mostly rectangular hole (with a "mouse ear" on one corner),
+    /// fit one line to each side and draw crosses at the four corner intersections.
+    /// Assumes the rectangle is roughly axis-aligned in the image.
+    /// </summary>
+    /// <param name="img">Image to draw crosses on (8UC1 or 8UC3).</param>
+    /// <param name="contour">Contour of the hole (e.g. from FindContours).</param>
+    /// <param name="corners">Output 4 corners in order [TL, TR, BR, BL].</param>
+    /// <param name="maxSideDistance">
+    /// Max distance (in pixels) from the bounding-box edges to consider a contour point
+    /// as belonging to that side. Ear points that bulge inwards are mostly ignored.
+    /// </param>
+    /// <param name="crossHalfSize">Half-length of the cross arms (in pixels).</param>
+    /// <param name="thickness">Line thickness for cross drawing.</param>
+    /// <returns>true if we fitted 4 sides and produced corners; false otherwise.</returns>
+    public static bool FitRectSidesAndDrawCornerCrosses(
+        Mat img,
+        Point[] contour,
+        out Point2f[] corners,
+        double maxSideDistance = 5.0,
+        int crossHalfSize = 8,
+        int thickness = 2)
     {
-        Cv2.Line(img,
-            new OpenCvSharp.Point(center.X - size, center.Y),
-            new OpenCvSharp.Point(center.X + size, center.Y),
-            color, thickness);
+        if (img == null) throw new ArgumentNullException(nameof(img));
+        if (contour == null || contour.Length < 4)
+        {
+            corners = Array.Empty<Point2f>();
+            return false;
+        }
 
-        Cv2.Line(img,
-            new OpenCvSharp.Point(center.X, center.Y - size),
-            new OpenCvSharp.Point(center.X, center.Y + size),
-            color, thickness);
+        // 1) Axis-aligned bounding box of the contour
+        Rect rect = Cv2.BoundingRect(contour);
+        double leftX   = rect.X;
+        double rightX  = rect.X + rect.Width;
+        double topY    = rect.Y;
+        double bottomY = rect.Y + rect.Height;
+
+        // 2) Split contour points into four side-sets
+        var leftPts   = new List<Point2f>();
+        var rightPts  = new List<Point2f>();
+        var topPts    = new List<Point2f>();
+        var bottomPts = new List<Point2f>();
+
+        foreach (var p in contour)
+        {
+            double x = p.X;
+            double y = p.Y;
+
+            double dxL = Math.Abs(x - leftX);
+            double dxR = Math.Abs(x - rightX);
+            double dyT = Math.Abs(y - topY);
+            double dyB = Math.Abs(y - bottomY);
+
+            double minDist = Math.Min(Math.Min(dxL, dxR), Math.Min(dyT, dyB));
+            if (minDist > maxSideDistance)
+                continue; // too far from any side, ignore (this includes most of the dogbone arc)
+
+            // Assign to the closest side (ties broken in this order)
+            if (minDist == dxL)
+                leftPts.Add(p);
+            else if (minDist == dxR)
+                rightPts.Add(p);
+            else if (minDist == dyT)
+                topPts.Add(p);
+            else
+                bottomPts.Add(p);
+        }
+
+        // Require at least a few points for each side
+        if (leftPts.Count < 2 || rightPts.Count < 2 ||
+            topPts.Count < 2  || bottomPts.Count < 2)
+        {
+            corners = Array.Empty<Point2f>();
+            return false;
+        }
+
+        // 3) Fit line to each side
+        Vec4f leftLine   = FitLineFromPoints(leftPts);
+        Vec4f rightLine  = FitLineFromPoints(rightPts);
+        Vec4f topLine    = FitLineFromPoints(topPts);
+        Vec4f bottomLine = FitLineFromPoints(bottomPts);
+
+        // If any fit failed, bail
+        if (!IsValidLine(leftLine) || !IsValidLine(rightLine) ||
+            !IsValidLine(topLine)  || !IsValidLine(bottomLine))
+        {
+            corners = Array.Empty<Point2f>();
+            return false;
+        }
+
+        // 4) Intersections -> corners
+        bool okTL = TryIntersectLines(topLine,    leftLine,   out Point2f tl);
+        bool okTR = TryIntersectLines(topLine,    rightLine,  out Point2f tr);
+        bool okBR = TryIntersectLines(bottomLine, rightLine,  out Point2f br);
+        bool okBL = TryIntersectLines(bottomLine, leftLine,   out Point2f bl);
+
+        if (!okTL || !okTR || !okBR || !okBL)
+        {
+            corners = Array.Empty<Point2f>();
+            return false;
+        }
+
+        corners = new[] { tl, tr, br, bl };
+
+        // 5) Draw crosses at corners
+        Scalar crossColor = img.Channels() == 1
+            ? new Scalar(255)       // white on grayscale
+            : new Scalar(0, 0, 255); // red on BGR
+
+        foreach (var c in corners)
+        {
+            var center = new Point((int)Math.Round(c.X), (int)Math.Round(c.Y));
+
+            // horizontal
+            Cv2.Line(
+                img,
+                new Point(center.X - crossHalfSize, center.Y),
+                new Point(center.X + crossHalfSize, center.Y),
+                crossColor,
+                thickness);
+
+            // vertical
+            Cv2.Line(
+                img,
+                new Point(center.X, center.Y - crossHalfSize),
+                new Point(center.X, center.Y + crossHalfSize),
+                crossColor,
+                thickness);
+        }
+
+        return true;
+    }
+
+    // --- helpers ---
+
+    private static Vec4f FitLineFromPoints(List<Point2f> pts)
+    {
+        // OpenCvSharp FitLine result: (vx, vy, x0, y0)
+        Cv2.FitLine(
+            pts,
+            out Vec4f line,
+            DistanceTypes.L2,
+            0,
+            0.01,
+            0.01);
+
+        return line;
+    }
+
+    private static bool IsValidLine(Vec4f line)
+    {
+        float vx = line[0], vy = line[1];
+        return Math.Abs(vx) > 1e-6 || Math.Abs(vy) > 1e-6;
     }
 
     /// <summary>
-    /// Starting from a (possibly grayscale) bitmap where the voids are white after inversion,
-    /// run Connected Components, find rectangular/square blobs, and annotate each corner
-    /// with a cross. Returns an annotated bitmap.
+    /// Intersect two 2D lines in FitLine form (vx,vy,x0,y0).
+    /// Returns false if lines are nearly parallel.
     /// </summary>
-    public static Bitmap AnnotateRectanglesWithCC(
-        Bitmap input,
-        int morphKernelSize = 3,
-        int minArea = 200,
-        double maxAspectRatio = 4.0)
+    private static bool TryIntersectLines(Vec4f l1, Vec4f l2, out Point2f pt)
     {
-        if (input == null) throw new ArgumentNullException(nameof(input));
+        float vx1 = l1[0], vy1 = l1[1], x1 = l1[2], y1 = l1[3];
+        float vx2 = l2[0], vy2 = l2[1], x2 = l2[2], y2 = l2[3];
 
-        // --- 1. Convert to Mat ---
-        using var src = BitmapConverter.ToMat(input);
+        // normal (a,b) is perpendicular to direction (vx,vy)
+        float a1 = -vy1, b1 = vx1, c1 = -(a1 * x1 + b1 * y1);
+        float a2 = -vy2, b2 = vx2, c2 = -(a2 * x2 + b2 * y2);
 
-        // Ensure we have a single-channel grayscale for thresholding
-        using var gray = new Mat();
-        if (src.Channels() == 1)
+        float det = a1 * b2 - a2 * b1;
+        if (Math.Abs(det) < 1e-6f)
         {
-            src.CopyTo(gray);
-        }
-        else
-        {
-            Cv2.CvtColor(src, gray, ColorConversionCodes.BGR2GRAY);
+            pt = new Point2f(float.NaN, float.NaN);
+            return false; // almost parallel
         }
 
-        // --- 2. Threshold (holes => white, background => black) ---
-        using var bin = new Mat();
-        // Otsu tends to work well; you can change to a fixed threshold if needed
-        Cv2.Threshold(gray, bin, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
-
-        // --- 3. Optional morphology to close gaps between points ---
-        if (morphKernelSize > 0)
-        {
-            using var kernel = Cv2.GetStructuringElement(
-                MorphShapes.Rect,
-                new OpenCvSharp.Size(morphKernelSize, morphKernelSize));
-            Cv2.MorphologyEx(bin, bin, MorphTypes.Close, kernel);
-        }
-
-        // --- 4. Invert so "void region" is white (255), background is black (0) ---
-        using var inv = new Mat();
-        Cv2.BitwiseNot(bin, inv);
-
-        // --- 5. Connected Components on the inverted image ---
-        using var labels = new Mat();
-        using var stats = new Mat();
-        using var centroids = new Mat();
-        int nLabels = Cv2.ConnectedComponentsWithStats(
-            inv,
-            labels,
-            stats,
-            centroids,
-            PixelConnectivity.Connectivity8,
-            MatType.CV_32S);
-
-        // --- 6. Prepare color image to draw on ---
-        using var color = new Mat();
-        if (src.Channels() == 1)
-            Cv2.CvtColor(src, color, ColorConversionCodes.GRAY2BGR);
-        else
-            src.CopyTo(color);
-
-        // --- 7. Loop over components (label 0 = background, skip it) ---
-        for (int label = 1; label < nLabels; label++)
-        {
-            int area = stats.Get<int>(label, (int)ConnectedComponentsTypes.Area);
-            if (area < minArea)
-                continue; // too small, probably noise
-
-            int left   = stats.Get<int>(label, (int)ConnectedComponentsTypes.Left);
-            int top    = stats.Get<int>(label, (int)ConnectedComponentsTypes.Top);
-            int width  = stats.Get<int>(label, (int)ConnectedComponentsTypes.Width);
-            int height = stats.Get<int>(label, (int)ConnectedComponentsTypes.Height);
-
-            if (width <= 0 || height <= 0)
-                continue;
-
-            double aspect = (double)Math.Max(width, height) / Math.Min(width, height);
-
-            // Rough "rectangular-ish / squareish" filter:
-            //   aspect close-ish to 1 (square) or not insanely elongated (rectangles).
-            if (aspect > maxAspectRatio)
-                continue;
-
-            // --- 8. Rectangle corners in image coordinates ---
-            var c0 = new Point(left, top);
-            var c1 = new Point(left + width - 1, top);
-            var c2 = new Point(left + width - 1, top + height - 1);
-            var c3 = new Point(left, top + height - 1);
-
-            // Draw rectangle outline (optional)
-            Cv2.Rectangle(color, new OpenCvSharp.Rect(left, top, width, height),
-                new Scalar(0, 255, 0), 2);
-
-            // Draw crosses at corners
-            DrawCross(color, c0, 6, new Scalar(0, 0, 255), 2);
-            DrawCross(color, c1, 6, new Scalar(0, 0, 255), 2);
-            DrawCross(color, c2, 6, new Scalar(0, 0, 255), 2);
-            DrawCross(color, c3, 6, new Scalar(0, 0, 255), 2);
-        }
-
-        // --- 9. Convert back to Bitmap ---
-        return BitmapConverter.ToBitmap(color);
+        float x = (b1 * c2 - b2 * c1) / det;
+        float y = (c1 * a2 - c2 * a1) / det;
+        pt = new Point2f(x, y);
+        return true;
     }
 }
