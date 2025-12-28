@@ -1,136 +1,116 @@
-// ---- Fit lines to the 4 sides of `contour`, draw them, and mark corners ----
-if (contour != null && contour.Length >= 4)
+using OpenCvSharp;
+using System;
+using System.Linq;
+using System.Collections.Generic;
+
+public static class RectWallsFromContour
 {
-    // Convert contour to float points
-    var pts = contour.Select(p => new OpenCvSharp.Point2f(p.X, p.Y)).ToList();
-
-    // Bounding box in image coordinates
-    float minX = pts.Min(p => p.X);
-    float maxX = pts.Max(p => p.X);
-    float minY = pts.Min(p => p.Y);
-    float maxY = pts.Max(p => p.Y);
-
-    float size   = Math.Max(maxX - minX, maxY - minY);
-    float band   = 0.05f * size;   // side “thickness” band = 5% of bbox size
-    int   minPts = 10;             // minimum points to accept a side
-
-    var bottomPts = new List<OpenCvSharp.Point2f>();
-    var topPts    = new List<OpenCvSharp.Point2f>();
-    var leftPts   = new List<OpenCvSharp.Point2f>();
-    var rightPts  = new List<OpenCvSharp.Point2f>();
-
-    // Classify points to 4 sides by closeness to bbox edges
-    foreach (var p in pts)
+    // Returns 4 line segments (each as (p1,p2)): left, right, top, bottom (order noted below)
+    public static (Point2f A, Point2f B)[] FindRectangleWalls(Point[] contour, double clipPercent = 2.0)
     {
-        if (Math.Abs(p.Y - maxY) <= band) bottomPts.Add(p); // bottom edge
-        if (Math.Abs(p.Y - minY) <= band) topPts.Add(p);    // top edge
-        if (Math.Abs(p.X - minX) <= band) leftPts.Add(p);   // left edge
-        if (Math.Abs(p.X - maxX) <= band) rightPts.Add(p);  // right edge
+        if (contour == null || contour.Length < 10)
+            throw new ArgumentException("Contour too small.");
+
+        // --- 1) PCA to estimate dominant rectangle axis ---
+        // Build Nx2 float matrix of points
+        using var ptsMat = new Mat(contour.Length, 2, MatType.CV_32F);
+        for (int i = 0; i < contour.Length; i++)
+        {
+            ptsMat.Set(i, 0, (float)contour[i].X);
+            ptsMat.Set(i, 1, (float)contour[i].Y);
+        }
+
+        using var mean = new Mat();
+        using var evecs = new Mat();
+        Cv2.PCACompute(ptsMat, mean, evecs);
+
+        // First eigenvector is dominant direction
+        float vx = evecs.At<float>(0, 0);
+        float vy = evecs.At<float>(0, 1);
+        double angle = Math.Atan2(vy, vx);
+
+        // Rotation to align dominant axis with +X (rotate by -angle)
+        double ca = Math.Cos(-angle);
+        double sa = Math.Sin(-angle);
+
+        // Mean center
+        float cx = mean.At<float>(0, 0);
+        float cy = mean.At<float>(0, 1);
+
+        // Rotate all points into PCA-aligned space
+        float[] xs = new float[contour.Length];
+        float[] ys = new float[contour.Length];
+        for (int i = 0; i < contour.Length; i++)
+        {
+            float x = contour[i].X - cx;
+            float y = contour[i].Y - cy;
+            float xr = (float)(x * ca - y * sa);
+            float yr = (float)(x * sa + y * ca);
+            xs[i] = xr;
+            ys[i] = yr;
+        }
+
+        // --- 2) Robust bounds (ignore ear outliers) ---
+        // Use e.g. 2nd/98th percentile instead of min/max
+        float left   = Percentile(xs, clipPercent);
+        float right  = Percentile(xs, 100.0 - clipPercent);
+        float top    = Percentile(ys, clipPercent);
+        float bottom = Percentile(ys, 100.0 - clipPercent);
+
+        // Also choose line extents (span) robustly
+        float xMin = left, xMax = right;
+        float yMin = top,  yMax = bottom;
+
+        // --- 3) Create 4 axis-aligned segments in rotated space ---
+        // left wall:   x = left,  y from yMin..yMax
+        // right wall:  x = right, y from yMin..yMax
+        // top wall:    y = top,   x from xMin..xMax
+        // bottom wall: y = bottom,x from xMin..xMax
+        var leftSegR   = (new Point2f(left,  yMin), new Point2f(left,  yMax));
+        var rightSegR  = (new Point2f(right, yMin), new Point2f(right, yMax));
+        var topSegR    = (new Point2f(xMin,  top),  new Point2f(xMax,  top));
+        var bottomSegR = (new Point2f(xMin,  bottom),new Point2f(xMax, bottom));
+
+        // --- 4) Rotate segments back to original coordinates ---
+        // inverse rotation is +angle
+        double cb = Math.Cos(angle);
+        double sb = Math.Sin(angle);
+
+        Point2f Unrotate(Point2f p)
+        {
+            float x = p.X;
+            float y = p.Y;
+            float xo = (float)(x * cb - y * sb) + cx;
+            float yo = (float)(x * sb + y * cb) + cy;
+            return new Point2f(xo, yo);
+        }
+
+        (Point2f, Point2f) Back((Point2f A, Point2f B) s) => (Unrotate(s.A), Unrotate(s.B));
+
+        // Return in a consistent order:
+        // 0=left, 1=right, 2=top, 3=bottom
+        return new[]
+        {
+            Back(leftSegR),
+            Back(rightSegR),
+            Back(topSegR),
+            Back(bottomSegR),
+        };
     }
 
-    bool hasBottom = bottomPts.Count >= minPts;
-    bool hasTop    = topPts.Count    >= minPts;
-    bool hasLeft   = leftPts.Count   >= minPts;
-    bool hasRight  = rightPts.Count  >= minPts;
-
-    OpenCvSharp.Vec4f bottomLine = new OpenCvSharp.Vec4f();
-    OpenCvSharp.Vec4f topLine    = new OpenCvSharp.Vec4f();
-    OpenCvSharp.Vec4f leftLine   = new OpenCvSharp.Vec4f();
-    OpenCvSharp.Vec4f rightLine  = new OpenCvSharp.Vec4f();
-
-    // Fit lines: Vec4f = (vx, vy, x0, y0)
-    if (hasBottom)
-        bottomLine = OpenCvSharp.Cv2.FitLine(
-            bottomPts, OpenCvSharp.DistanceTypes.L2, 0, 0.01, 0.01);
-
-    if (hasTop)
-        topLine = OpenCvSharp.Cv2.FitLine(
-            topPts, OpenCvSharp.DistanceTypes.L2, 0, 0.01, 0.01);
-
-    if (hasLeft)
-        leftLine = OpenCvSharp.Cv2.FitLine(
-            leftPts, OpenCvSharp.DistanceTypes.L2, 0, 0.01, 0.01);
-
-    if (hasRight)
-        rightLine = OpenCvSharp.Cv2.FitLine(
-            rightPts, OpenCvSharp.DistanceTypes.L2, 0, 0.01, 0.01);
-
-    int imgW = flines.Cols;
-    int imgH = flines.Rows;
-    float L  = (float)Math.Sqrt(imgW * imgW + imgH * imgH); // “infinite” length
-
-    // Helper to draw a fitted Vec4f line
-    Action<OpenCvSharp.Vec4f> drawLine = line =>
+    private static float Percentile(float[] data, double p)
     {
-        float vx = line.Item0;
-        float vy = line.Item1;
-        float x0 = line.Item2;
-        float y0 = line.Item3;
+        var sorted = data.OrderBy(v => v).ToArray();
+        if (sorted.Length == 0) return 0;
 
-        float len = (float)Math.Sqrt(vx * vx + vy * vy);
-        if (len < 1e-6f) return;
+        double pos = (p / 100.0) * (sorted.Length - 1);
+        int i = (int)Math.Floor(pos);
+        int j = (int)Math.Ceiling(pos);
+        if (i == j) return sorted[i];
 
-        vx /= len;
-        vy /= len;
-
-        var p1 = new OpenCvSharp.Point(
-            (int)Math.Round(x0 - vx * L),
-            (int)Math.Round(y0 - vy * L));
-        var p2 = new OpenCvSharp.Point(
-            (int)Math.Round(x0 + vx * L),
-            (int)Math.Round(y0 + vy * L));
-
-        OpenCvSharp.Cv2.Line(flines, p1, p2, new OpenCvSharp.Scalar(0, 255, 0), 2);
-    };
-
-    if (hasBottom) drawLine(bottomLine);
-    if (hasTop)    drawLine(topLine);
-    if (hasLeft)   drawLine(leftLine);
-    if (hasRight)  drawLine(rightLine);
-
-    // Compute intersections (corners) of pairs of Vec4f lines
-    var corners = new System.Collections.Generic.List<OpenCvSharp.Point>();
-
-    Action<OpenCvSharp.Vec4f, OpenCvSharp.Vec4f> addIntersection =
-        (l1, l2) =>
-        {
-            float vx1 = l1.Item0, vy1 = l1.Item1, x01 = l1.Item2, y01 = l1.Item3;
-            float vx2 = l2.Item0, vy2 = l2.Item1, x02 = l2.Item2, y02 = l2.Item3;
-
-            float denom = vx1 * vy2 - vy1 * vx2;
-            if (Math.Abs(denom) < 1e-6f) return; // parallel
-
-            float t1 = ((x02 - x01) * vy2 - (y02 - y01) * vx2) / denom;
-            float xi = x01 + vx1 * t1;
-            float yi = y01 + vy1 * t1;
-
-            corners.Add(new OpenCvSharp.Point(
-                (int)Math.Round(xi),
-                (int)Math.Round(yi)));
-        };
-
-    if (hasBottom && hasLeft)  addIntersection(bottomLine, leftLine);   // BL
-    if (hasBottom && hasRight) addIntersection(bottomLine, rightLine);  // BR
-    if (hasTop    && hasLeft)  addIntersection(topLine,    leftLine);   // TL
-    if (hasTop    && hasRight) addIntersection(topLine,    rightLine);  // TR
-
-    // Draw red crosses at each corner
-    int crossHalf = 10;
-    foreach (var c in corners)
-    {
-        OpenCvSharp.Cv2.Line(
-            flines,
-            new OpenCvSharp.Point(c.X - crossHalf, c.Y),
-            new OpenCvSharp.Point(c.X + crossHalf, c.Y),
-            new OpenCvSharp.Scalar(0, 0, 255),
-            2);
-
-        OpenCvSharp.Cv2.Line(
-            flines,
-            new OpenCvSharp.Point(c.X, c.Y - crossHalf),
-            new OpenCvSharp.Point(c.X, c.Y + crossHalf),
-            new OpenCvSharp.Scalar(0, 0, 255),
-            2);
+        float a = sorted[i];
+        float b = sorted[j];
+        float t = (float)(pos - i);
+        return a + (b - a) * t;
     }
 }
-// ---- end block ----
