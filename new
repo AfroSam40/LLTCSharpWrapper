@@ -449,7 +449,7 @@ namespace ImgZooming
 
 
         private bool isSelecting = false;
-       
+
         private readonly Stopwatch doubleClickStopwatch = new Stopwatch(); // Detects double‐click
 
         private Point currentMousePosition;
@@ -540,4 +540,4 @@ namespace ImgZooming
                     Initialize(value);
                 }
 
-                // Let the base store our 
+                // Let the base store our contain
