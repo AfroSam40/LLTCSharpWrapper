@@ -541,3 +541,396 @@ namespace ImgZooming
                 }
 
                 // Let the base store our contain
+                base.Child = container;
+            }
+        }
+
+        private void Initialize(UIElement newChild)
+        {
+            container = new Grid { Background = Brushes.Transparent };
+            container.Children.Clear();
+
+            // Make sure newChild is removed from any old parent
+            var oldParent = LogicalTreeHelper.GetParent(newChild) as FrameworkElement;
+            if (oldParent is Panel p) p.Children.Remove(newChild);
+            else if (oldParent is Decorator d) d.Child = null;
+            else if (oldParent is ContentControl cc) cc.Content = null;
+
+            // Ensure it has Scale + Translate transforms
+            var group = new TransformGroup();
+            group.Children.Add(new ScaleTransform());
+            group.Children.Add(new TranslateTransform());
+            newChild.RenderTransform = group;
+            newChild.RenderTransformOrigin = new Point(0.0, 0.0);
+
+            container.Children.Add(newChild);
+            container.Children.Add(selectionRectangle);
+            container.Children.Add(focusRec);
+
+            // Hook up events on ZoomBorder
+            this.MouseWheel += OnMouseWheel;
+            this.MouseRightButtonDown += OnMouseRightButtonDown;
+            this.MouseRightButtonUp += OnMouseRightButtonUp;
+            this.MouseMove += OnMouseMove;
+            this.MouseLeave += ZoomBorder_MouseLeave;
+            this.MouseLeftButtonDown += OnMouseLeftButtonDown;
+            this.MouseLeftButtonUp += OnMouseLeftButtonUp;
+
+            child = newChild;
+        }
+
+        private void OnMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            if(!isDragging) return;
+            isDragging = false;
+
+            this.ReleaseMouseCapture();
+
+            e.Handled = true;   
+        }
+
+        private void OnMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (child == null ) return;
+
+
+            isDragging = true;
+
+            dragStartPoint = e.GetPosition(child);
+
+            this.CaptureMouse();
+
+            CalculateDragLimits();
+
+            e.Handled = true;
+        }
+
+        private void CalculateDragLimits()
+        {
+            Rect childLocalBounds = VisualTreeHelper.GetDescendantBounds(child);
+            GeneralTransform toBorder = child.TransformToAncestor(this);
+            childBoundsStart = toBorder.TransformBounds(childLocalBounds);
+
+
+            double borderWidth = this.ActualWidth;
+            double borderHeight = this.ActualHeight;
+
+
+            if (childBoundsStart.Left < 0)
+                maxRightDrag = -childBoundsStart.Left;
+            else
+                maxRightDrag = 0;
+
+            if (childBoundsStart.Right > borderWidth)
+                maxLeftDrag = childBoundsStart.Right - borderWidth;
+            else
+                maxLeftDrag = 0;
+
+
+            if (childBoundsStart.Top < 0)
+                maxDownDrag = -childBoundsStart.Top;
+            else
+                maxDownDrag = 0;
+
+            if (childBoundsStart.Bottom > borderHeight)
+                maxUpDrag = childBoundsStart.Bottom - borderHeight;
+            else
+                maxUpDrag = 0;
+        }
+
+        private void ZoomBorder_MouseLeave(object sender, MouseEventArgs e)
+        {
+            CurrentMousePosition = new Point(0,0);
+        }
+
+        #endregion
+
+        #region Zoom & Pan Reset
+
+        public void Reset()
+        {
+            if (child == null) return;
+
+            var st = GetScaleTransform(child);
+            st.ScaleX = 1.0;
+            st.ScaleY = 1.0;
+
+            var tt = GetTranslateTransform(child);
+            tt.X = 0.0;
+            tt.Y = 0.0;
+        }
+
+        #endregion
+
+        #region Mouse Events
+
+        private void OnMouseWheel(object sender, MouseWheelEventArgs e)
+        {
+
+        }
+
+        private void OnMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (child == null) return;
+
+            // Check for double‐click => reset
+            if (doubleClickStopwatch.IsRunning && doubleClickStopwatch.ElapsedMilliseconds < 500)
+            {
+                Reset();
+                doubleClickStopwatch.Reset();
+            }
+            else
+            {
+                doubleClickStopwatch.Restart();
+
+                // Begin selection
+                if (!isSelecting)
+                {
+                    Point startchild = e.GetPosition(child);
+
+                    if (startchild.X < 0 || startchild.X > ((Image)child).ActualWidth) return;
+                    if (startchild.Y < 0 || startchild.Y > ((Image)child).ActualHeight) return;
+
+                    isSelecting = true;
+                    this.CaptureMouse();
+
+                    // Starting point in the parent's (Grid) coords
+                    startParent = e.GetPosition(container!);
+
+                    // Initialize the selection rectangle
+                    selectionRectangle.Visibility = Visibility.Visible;
+                    selectionRectangle.Margin = new Thickness(startParent.X, startParent.Y, 0, 0);
+                    selectionRectangle.Width = 0;
+                    selectionRectangle.Height = 0;
+                }
+            }
+
+            e.Handled = true;
+        }
+
+        private void OnMouseMove(object sender, MouseEventArgs e)
+        {
+            if (child == null) return;
+            BitmapSource? bitmapSource = ((Image)child).Source as BitmapSource;
+            if (bitmapSource != null)
+            {
+                Image MyImage = (Image)child;
+
+                int originalPixelWidth = bitmapSource.PixelWidth;
+                int originalPixelHeight = bitmapSource.PixelHeight;
+
+                //Get the mouses location in the Child coordinate systemm
+                Point mousePosInControl = e.GetPosition(child);
+                int pixelX = (int)((mousePosInControl.X / MyImage.ActualWidth) * originalPixelWidth);
+                int pixelY = (int)((mousePosInControl.Y / MyImage.ActualHeight) * originalPixelHeight);
+                if (pixelX > originalPixelWidth) pixelX = originalPixelWidth;
+                if (pixelY > originalPixelHeight) pixelY = originalPixelHeight;
+
+                CurrentMousePosition = new Point(pixelX, pixelY);
+            }
+
+
+
+
+            if (isSelecting)
+            {
+
+                Point startchild = e.GetPosition(child);
+
+                if (startchild.X < 0 || startchild.X > ((Image)child).ActualWidth) return;
+                if (startchild.Y < 0 || startchild.Y > ((Image)child).ActualHeight) return;
+
+                // Draw the selection in the Grid's coordinate system
+                Point currentParent = e.GetPosition(container!);
+
+
+                double x = Math.Min(startParent.X, currentParent.X);
+                double y = Math.Min(startParent.Y, currentParent.Y);
+                double width = Math.Abs(currentParent.X - startParent.X);
+                double height = Math.Abs(currentParent.Y - startParent.Y);
+
+                selectionRectangle.Margin = new Thickness(x, y, 0, 0);
+                selectionRectangle.Width = width;
+                selectionRectangle.Height = height;
+            }
+            else if (isDragging)
+            {
+                var tt = GetTranslateTransform(child);
+                //Point currentPoint = e.GetPosition(child);
+
+                ////if (currentPoint.X < 0 || currentPoint.Y < 0) return;
+                ////if (currentPoint.X > ((Image)child).ActualWidth || currentPoint.Y > ((Image)child).ActualHeight) return;
+
+                //double offsetX = currentPoint.X - dragStartPoint.X;
+                //double offseY = currentPoint.Y - dragStartPoint.Y;
+
+                //tt.X += offsetX;
+                //tt.Y += offseY;
+
+                // 1. Current mouse position in this ZoomBorder's coordinate system
+                Point currentPos = e.GetPosition(child);
+
+                // 2. Compute the raw offset from dragStartPoint
+                double offsetX = currentPos.X - dragStartPoint.X;
+                double offsetY = currentPos.Y - dragStartPoint.Y;
+
+                // 3. We want to apply (originX + offsetX) to tt.X, but clamp it
+                //    based on the maximum left/right drags we computed.
+                // If offsetX is positive (moving to the right), we can't exceed maxRightDrag
+                // If offsetX is negative (moving to the left), we can't exceed -maxLeftDrag
+
+                if (offsetX > maxRightDrag) offsetX = maxRightDrag;
+                if (offsetX < -maxLeftDrag) offsetX = -maxLeftDrag;
+
+                if (offsetY > maxDownDrag) offsetY = maxDownDrag;
+                if (offsetY < -maxUpDrag) offsetY = -maxUpDrag;
+
+                double newX = tt.X + offsetX;
+                double newY = tt.Y + offsetY;
+
+                // 4. Assign back
+                //var tt = GetTranslateTransform(child);
+                tt.X = newX;
+                tt.Y = newY;
+
+                CalculateDragLimits();
+
+                e.Handled = true;
+            }
+
+
+        }
+
+        public void DrawRegion(Point TopLeftLoc, Point WidthHeight, int Padding)
+        {
+
+            if (child == null) return;
+            BitmapSource? bitmapSource = ((Image)child).Source as BitmapSource;
+            if (bitmapSource != null)
+            {
+                Image MyImage = (Image)child;
+
+                int originalPixelWidth = bitmapSource.PixelWidth;
+                int originalPixelHeight = bitmapSource.PixelHeight;
+
+                Point ImgLoc =  MyImage.TranslatePoint(new Point(0, 0), (UIElement)MyImage.Parent);
+                //Get the mouses location in the Child coordinate systemm
+                int screenPosX = (int)((TopLeftLoc.X/originalPixelWidth) * MyImage.ActualWidth) - Padding + (int)ImgLoc.X;
+                int screenPosY = (int)((TopLeftLoc.Y/originalPixelHeight) * MyImage.ActualHeight) + Padding + (int)ImgLoc.Y;
+                int screenWidth = (int)((WidthHeight.X / originalPixelWidth) * MyImage.ActualWidth) +Padding;
+                int screenHeight = (int)((WidthHeight.Y / originalPixelHeight) * MyImage.ActualHeight) + Padding;
+
+                focusRec.Visibility = Visibility.Visible;
+                focusRec.Margin = new Thickness(screenPosX, screenPosY, 0,0);
+                focusRec.Width = screenWidth;
+                focusRec.Height = screenHeight;
+            }
+        }
+
+        private (bool, bool, bool) CheckIfImageFilling()
+        {
+            // 1) Child's local bounding box
+            Rect childLocalBounds = VisualTreeHelper.GetDescendantBounds(child);
+
+            // 2) Convert to ZoomBorder coordinates
+            GeneralTransform toBorder = child.TransformToAncestor(this);
+            Rect childBoundsInBorder = toBorder.TransformBounds(childLocalBounds);
+
+            // 3) ZoomBorder's bounding rectangle in its own coords
+            var borderRect = new Rect(
+                x: 0,
+                y: 0,
+                width: this.ActualWidth,
+                height: this.ActualHeight
+            );
+
+            // 4) Check if child covers border area
+            //    For it to "fill" the ZoomBorder, we want the child's bounding box
+            //    to start at or above the top-left of the border
+            //    and extend at least to or past the bottom-right.
+            bool fillsWidth = (childBoundsInBorder.Left <= 0) &&
+                               (childBoundsInBorder.Right >= this.ActualWidth);
+            bool fillsHeight = (childBoundsInBorder.Top <= 0) &&
+                               (childBoundsInBorder.Bottom >= this.ActualHeight);
+
+            bool isCovering = fillsWidth && fillsHeight;
+            Debug.Print($"Width - {fillsWidth}, Height - {fillsHeight}, isCovering - {isCovering}");
+            return (isCovering, fillsWidth, fillsHeight);
+        }
+
+        private void OnMouseRightButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            if (!isSelecting || child == null) return;
+
+            isSelecting = false;
+            this.ReleaseMouseCapture();
+
+            // End coords in parent's (Grid) space
+            Point endParent = e.GetPosition(container!);
+            double rectWidth = Math.Abs(endParent.X - startParent.X);
+            double rectHeight = Math.Abs(endParent.Y - startParent.Y);
+
+            if (rectWidth > 0 && rectHeight > 0)
+            {
+                // --- 1) Convert selection to child coords ---
+                // Because child may already be scaled/translated, we invert child->ZoomBorder transform.
+                var transformToBorder = child.TransformToAncestor(this);
+                var inverse = transformToBorder.Inverse;
+
+                Point startChild = inverse.Transform(startParent);
+                Point endChild = inverse.Transform(endParent);
+
+                double selChildWidth = Math.Abs(endChild.X - startChild.X);
+                double selChildHeight = Math.Abs(endChild.Y - startChild.Y);
+
+                // Only apply if it's non‐zero
+                if (selChildWidth > 0 && selChildHeight > 0)
+                {
+                    // --- 2) Compute the *absolute* scale so that selection fills the ZoomBorder ---
+                    // Instead of multiplying by the old scale, we just set the final scale to this ratio.
+                    double scaleX = this.ActualWidth / selChildWidth;
+                    double scaleY = this.ActualHeight / selChildHeight;
+                    double scale = Math.Min(scaleX, scaleY);
+                    //BitmapSource s = new CroppedBitmap(new BitmapSource(), new Int32Rect());
+                    var st = GetScaleTransform(child);
+                    var tt = GetTranslateTransform(child);
+
+                    // Instead of st.ScaleX *= scale, we do:
+                    st.ScaleX = scale;
+                    st.ScaleY = scale;
+
+                    // --- 3) Re‐center so that the selection is in the middle of ZoomBorder ---
+                    // We'll figure out where the selection midpoint is in child coords:
+                    Point selectionCenterChild = new Point(
+                        (startChild.X + endChild.X) / 2.0,
+                        (startChild.Y + endChild.Y) / 2.0
+                    );
+
+                    // Now transform that point forward to the ZoomBorder again,
+                    // with our *new* scale in place.
+                    var newTransform = child.TransformToAncestor(this);
+                    Point centerInBorder = newTransform.Transform(selectionCenterChild);
+
+                    // We want that point to appear at the center of the ZoomBorder
+                    double desiredX = this.ActualWidth / 2.0;
+                    double desiredY = this.ActualHeight / 2.0;
+
+                    double offsetX = centerInBorder.X - desiredX;
+                    double offsetY = centerInBorder.Y - desiredY;
+
+                    tt.X -= offsetX;
+                    tt.Y -= offsetY;
+                }
+            }
+
+            // Hide the selection rectangle
+            selectionRectangle.Visibility = Visibility.Collapsed;
+            //CheckIfImageFilling();
+            e.Handled = true;
+        }
+
+        #endregion
+
+
+    }
+}
