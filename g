@@ -23,33 +23,36 @@ public static class HitTestHelpers
         var hits = viewport.FindHits(mousePosition);
         if (hits != null && hits.Count > 0)
         {
-            // closest hit (smallest distance)
             var nearestHit = hits.OrderBy(h => h.Distance).First();
             result = nearestHit.PointHit;
             return true;
         }
 
-        // 2) If no visual hit: build a ray from camera through mouse
-        Point3D rayOrigin;
-        Vector3D rayDirection;
-        if (!Viewport3DHelper.Point2DToRay3D(
-                viewport.Viewport,
-                mousePosition,
-                out rayOrigin,
-                out rayDirection))
+        // 2) Build a ray from camera through mouse using Helix's helper
+        if (pointCloud == null || pointCloud.Count == 0)
         {
-            // If we can't even get a ray, fallback to "nearest point to camera"
-            if (pointCloud == null || pointCloud.Count == 0)
-            {
-                result = new Point3D();
-                return false;
-            }
+            result = new Point3D();
+            return false;
+        }
 
+        Ray3D ray;
+
+        try
+        {
+            // This is the correct Helix method:
+            // Ray3D Viewport3DHelper.Point2DtoRay3D(Viewport3D viewport, Point p)
+            ray = Viewport3DHelper.Point2DtoRay3D(viewport.Viewport, mousePosition);
+        }
+        catch
+        {
+            // If something went wrong, just return the point nearest to the camera position
+            var camPos = viewport.Camera.Position;
             double bestD2 = double.MaxValue;
             Point3D best = new Point3D();
+
             foreach (var p in pointCloud)
             {
-                double d2 = (p - rayOrigin).LengthSquared;
+                double d2 = (p - camPos).LengthSquared;
                 if (d2 < bestD2)
                 {
                     bestD2 = d2;
@@ -61,13 +64,8 @@ public static class HitTestHelpers
             return true;
         }
 
-        if (pointCloud == null || pointCloud.Count == 0)
-        {
-            result = new Point3D();
-            return false;
-        }
-
-        // Normalize direction for safety
+        var rayOrigin = ray.Origin;
+        var rayDirection = ray.Direction;
         rayDirection.Normalize();
         double dirLen2 = rayDirection.LengthSquared;
 
@@ -79,15 +77,10 @@ public static class HitTestHelpers
         foreach (var p in pointCloud)
         {
             Vector3D w = p - rayOrigin;
-
-            // parameter t along the ray (projection of w onto ray direction)
             double t = Vector3D.DotProduct(w, rayDirection) / dirLen2;
 
             if (t <= 0)
-            {
-                // behind the camera, skip it
-                continue;
-            }
+                continue; // behind camera
 
             Point3D proj = rayOrigin + t * rayDirection;
             double d2 = (p - proj).LengthSquared;
@@ -100,8 +93,7 @@ public static class HitTestHelpers
             }
         }
 
-        // 4) If all points were behind camera (or something weird),
-        //    fall back to plain nearest in 3D
+        // 4) If all points ended up “behind”, fall back to nearest to camera
         if (!found)
         {
             double bestD2 = double.MaxValue;
