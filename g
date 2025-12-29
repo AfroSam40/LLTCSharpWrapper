@@ -1,18 +1,26 @@
 using OpenCvSharp;
 using System;
 using System.Linq;
-using System.Collections.Generic;
 
-public static class RectWallsFromContour
+public static class RectWallsExpectedSize
 {
-    // Returns 4 line segments (each as (p1,p2)): left, right, top, bottom (order noted below)
-    public static (Point2f A, Point2f B)[] FindRectangleWalls(Point[] contour, double clipPercent = 2.0)
+    // Returns 4 wall segments: left, right, top, bottom
+    // Also outputs the filtered (ear-removed) inlier points if you want to debug / refit.
+    public static (Point2f A, Point2f B)[] FindWallsAndFilterEar(
+        Point[] contour,
+        float expectedW,
+        float expectedH,
+        float edgeTolPx = 3.0f,          // how close a point must be to an edge to count as inlier
+        float alongTolPx = 6.0f,         // how far outside [top,bottom]/[left,right] we allow for edge membership
+        float centerSearchFrac = 0.05f,  // search +/- this fraction of W/H around initial center
+        int searchSteps = 11,            // odd number is nice (includes 0)
+        out Point2f[] inliersOriginal)
     {
-        if (contour == null || contour.Length < 10)
+        if (contour == null || contour.Length < 20)
             throw new ArgumentException("Contour too small.");
 
-        // --- 1) PCA to estimate dominant rectangle axis ---
-        // Build Nx2 float matrix of points
+        // ---------- 1) PCA orientation ----------
+        // Build Nx2 float matrix
         using var ptsMat = new Mat(contour.Length, 2, MatType.CV_32F);
         for (int i = 0; i < contour.Length; i++)
         {
@@ -24,60 +32,80 @@ public static class RectWallsFromContour
         using var evecs = new Mat();
         Cv2.PCACompute(ptsMat, mean, evecs);
 
-        // First eigenvector is dominant direction
+        float cx = mean.At<float>(0, 0);
+        float cy = mean.At<float>(0, 1);
+
         float vx = evecs.At<float>(0, 0);
         float vy = evecs.At<float>(0, 1);
         double angle = Math.Atan2(vy, vx);
 
-        // Rotation to align dominant axis with +X (rotate by -angle)
-        double ca = Math.Cos(-angle);
-        double sa = Math.Sin(-angle);
+        // Rotate by -angle to align dominant axis with X
+        double ca = Math.Cos(-angle), sa = Math.Sin(-angle);
 
-        // Mean center
-        float cx = mean.At<float>(0, 0);
-        float cy = mean.At<float>(0, 1);
-
-        // Rotate all points into PCA-aligned space
-        float[] xs = new float[contour.Length];
-        float[] ys = new float[contour.Length];
+        Point2f[] rotPts = new Point2f[contour.Length];
         for (int i = 0; i < contour.Length; i++)
         {
             float x = contour[i].X - cx;
             float y = contour[i].Y - cy;
             float xr = (float)(x * ca - y * sa);
             float yr = (float)(x * sa + y * ca);
-            xs[i] = xr;
-            ys[i] = yr;
+            rotPts[i] = new Point2f(xr, yr);
         }
 
-        // --- 2) Robust bounds (ignore ear outliers) ---
-        // Use e.g. 2nd/98th percentile instead of min/max
-        float left   = Percentile(xs, clipPercent);
-        float right  = Percentile(xs, 100.0 - clipPercent);
-        float top    = Percentile(ys, clipPercent);
-        float bottom = Percentile(ys, 100.0 - clipPercent);
+        // ---------- 2) Initial center estimate (median is robust to the ear) ----------
+        float medX = Median(rotPts.Select(p => p.X).ToArray());
+        float medY = Median(rotPts.Select(p => p.Y).ToArray());
 
-        // Also choose line extents (span) robustly
-        float xMin = left, xMax = right;
-        float yMin = top,  yMax = bottom;
+        // ---------- 3) Grid search for best center (max inliers near expected edges) ----------
+        float dxMax = expectedW * centerSearchFrac;
+        float dyMax = expectedH * centerSearchFrac;
 
-        // --- 3) Create 4 axis-aligned segments in rotated space ---
-        // left wall:   x = left,  y from yMin..yMax
-        // right wall:  x = right, y from yMin..yMax
-        // top wall:    y = top,   x from xMin..xMax
-        // bottom wall: y = bottom,x from xMin..xMax
-        var leftSegR   = (new Point2f(left,  yMin), new Point2f(left,  yMax));
-        var rightSegR  = (new Point2f(right, yMin), new Point2f(right, yMax));
-        var topSegR    = (new Point2f(xMin,  top),  new Point2f(xMax,  top));
-        var bottomSegR = (new Point2f(xMin,  bottom),new Point2f(xMax, bottom));
+        int bestCount = -1;
+        float bestCxR = medX, bestCyR = medY;
 
-        // --- 4) Rotate segments back to original coordinates ---
-        // inverse rotation is +angle
-        double cb = Math.Cos(angle);
-        double sb = Math.Sin(angle);
+        for (int ix = 0; ix < searchSteps; ix++)
+        {
+            float tx = Lerp(-dxMax, dxMax, ix / (float)(searchSteps - 1));
+            for (int iy = 0; iy < searchSteps; iy++)
+            {
+                float ty = Lerp(-dyMax, dyMax, iy / (float)(searchSteps - 1));
+                float cxr = medX + tx;
+                float cyr = medY + ty;
+
+                int count = CountEdgeInliers(rotPts, cxr, cyr, expectedW, expectedH, edgeTolPx, alongTolPx);
+                if (count > bestCount)
+                {
+                    bestCount = count;
+                    bestCxR = cxr;
+                    bestCyR = cyr;
+                }
+            }
+        }
+
+        // ---------- 4) Define rectangle edges in rotated space ----------
+        float left   = bestCxR - expectedW * 0.5f;
+        float right  = bestCxR + expectedW * 0.5f;
+        float top    = bestCyR - expectedH * 0.5f;
+        float bottom = bestCyR + expectedH * 0.5f;
+
+        // ---------- 5) Filter ear: keep only points close to any edge ----------
+        var inliersR = rotPts.Where(p => IsNearAnyEdge(p, left, right, top, bottom, edgeTolPx, alongTolPx))
+                             .ToArray();
+
+        // ---------- 6) Build wall segments in rotated space ----------
+        var leftSegR   = (new Point2f(left,  top),    new Point2f(left,  bottom));
+        var rightSegR  = (new Point2f(right, top),    new Point2f(right, bottom));
+        var topSegR    = (new Point2f(left,  top),    new Point2f(right, top));
+        var bottomSegR = (new Point2f(left,  bottom), new Point2f(right, bottom));
+
+        // ---------- 7) Rotate back to original space ----------
+        double cb = Math.Cos(angle), sb = Math.Sin(angle);
 
         Point2f Unrotate(Point2f p)
         {
+            // p is in rotated coords centered at (bestCxR, bestCyR)??? No:
+            // our rotated coords are centered at PCA mean (cx,cy) but not translated by best center.
+            // So we just unrotate and add back (cx,cy).
             float x = p.X;
             float y = p.Y;
             float xo = (float)(x * cb - y * sb) + cx;
@@ -85,10 +113,10 @@ public static class RectWallsFromContour
             return new Point2f(xo, yo);
         }
 
+        inliersOriginal = inliersR.Select(Unrotate).ToArray();
+
         (Point2f, Point2f) Back((Point2f A, Point2f B) s) => (Unrotate(s.A), Unrotate(s.B));
 
-        // Return in a consistent order:
-        // 0=left, 1=right, 2=top, 3=bottom
         return new[]
         {
             Back(leftSegR),
@@ -98,28 +126,39 @@ public static class RectWallsFromContour
         };
     }
 
-    private static float Percentile(float[] data, double p)
+    // --- helpers ---
+    private static int CountEdgeInliers(Point2f[] pts, float cX, float cY, float w, float h, float edgeTol, float alongTol)
     {
-        var sorted = data.OrderBy(v => v).ToArray();
-        if (sorted.Length == 0) return 0;
+        float left = cX - w * 0.5f, right = cX + w * 0.5f;
+        float top = cY - h * 0.5f, bottom = cY + h * 0.5f;
 
-        double pos = (p / 100.0) * (sorted.Length - 1);
-        int i = (int)Math.Floor(pos);
-        int j = (int)Math.Ceiling(pos);
-        if (i == j) return sorted[i];
-
-        float a = sorted[i];
-        float b = sorted[j];
-        float t = (float)(pos - i);
-        return a + (b - a) * t;
+        int count = 0;
+        for (int i = 0; i < pts.Length; i++)
+            if (IsNearAnyEdge(pts[i], left, right, top, bottom, edgeTol, alongTol))
+                count++;
+        return count;
     }
+
+    private static bool IsNearAnyEdge(Point2f p, float left, float right, float top, float bottom, float edgeTol, float alongTol)
+    {
+        // close to vertical edges AND within y-range (with slack)
+        bool nearLeft  = Math.Abs(p.X - left)  <= edgeTol && p.Y >= top - alongTol && p.Y <= bottom + alongTol;
+        bool nearRight = Math.Abs(p.X - right) <= edgeTol && p.Y >= top - alongTol && p.Y <= bottom + alongTol;
+
+        // close to horizontal edges AND within x-range (with slack)
+        bool nearTop    = Math.Abs(p.Y - top)    <= edgeTol && p.X >= left - alongTol && p.X <= right + alongTol;
+        bool nearBottom = Math.Abs(p.Y - bottom) <= edgeTol && p.X >= left - alongTol && p.X <= right + alongTol;
+
+        return nearLeft || nearRight || nearTop || nearBottom;
+    }
+
+    private static float Median(float[] a)
+    {
+        var s = a.OrderBy(v => v).ToArray();
+        int n = s.Length;
+        if (n == 0) return 0;
+        return (n % 2 == 1) ? s[n / 2] : 0.5f * (s[n / 2 - 1] + s[n / 2]);
+    }
+
+    private static float Lerp(float a, float b, float t) => a + (b - a) * t;
 }
-
-
-
-var walls = RectWallsFromContour.FindRectangleWalls(contour, clipPercent: 2.0);
-// walls[0]=left, walls[1]=right, walls[2]=top, walls[3]=bottom
-Cv2.Line(img, (Point)walls[0].A, (Point)walls[0].B, Scalar.Lime, 2);
-Cv2.Line(img, (Point)walls[1].A, (Point)walls[1].B, Scalar.Lime, 2);
-Cv2.Line(img, (Point)walls[2].A, (Point)walls[2].B, Scalar.Lime, 2);
-Cv2.Line(img, (Point)walls[3].A, (Point)walls[3].B, Scalar.Lime, 2);
