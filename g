@@ -162,3 +162,17 @@ public static class RectWallsExpectedSize
 
     private static float Lerp(float a, float b, float t) => a + (b - a) * t;
 }
+
+Point2f[] inliers;
+var walls = RectWallsExpectedSize.FindWallsAndFilterEar(
+    contour,
+    expectedW: 200, expectedH: 120,
+    edgeTolPx: 3, alongTolPx: 6,
+    out inliers
+);
+
+// walls[0]=left, [1]=right, [2]=top, [3]=bottom
+Cv2.Line(img, (Point)walls[0].A, (Point)walls[0].B, Scalar.Lime, 2);
+Cv2.Line(img, (Point)walls[1].A, (Point)walls[1].B, Scalar.Lime, 2);
+Cv2.Line(img, (Point)walls[2].A, (Point)walls[2].B, Scalar.Lime, 2);
+Cv2.Line(img, (Point)walls[3].A, (Point)walls[3].B, Scalar.Lime, 2);
