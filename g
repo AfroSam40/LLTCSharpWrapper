@@ -1,155 +1,181 @@
 using OpenCvSharp;
 using System;
 using System.Linq;
+using System.Collections.Generic;
 
-public static class RectWallsExpectedSize
+public static class FixedSizeRectFit
 {
-    // Returns 4 wall segments: left, right, top, bottom
-    // Also outputs the filtered (ear-removed) inlier points if you want to debug / refit.
-    public static (Point2f A, Point2f B)[] FindWallsAndFilterEar(
+    // Returns 4 wall segments: left, right, top, bottom (in image coordinates)
+    public static (Point2f A, Point2f B)[] FindWallsFixedSize(
         Point[] contour,
         float expectedW,
         float expectedH,
-        float edgeTolPx = 3.0f,          // how close a point must be to an edge to count as inlier
-        float alongTolPx = 6.0f,         // how far outside [top,bottom]/[left,right] we allow for edge membership
-        float centerSearchFrac = 0.05f,  // search +/- this fraction of W/H around initial center
-        int searchSteps = 11,            // odd number is nice (includes 0)
-        out Point2f[] inliersOriginal)
+        float edgeTolPx = 3f,          // distance to a wall to count as inlier
+        float alongTolPx = 8f,         // slack past wall endpoints
+        float angleSearchDeg = 20f,    // search +/- around initial angle
+        int angleSteps = 41,           // number of angles to test
+        float centerSearchFrac = 0.06f,// search +/- fraction of W/H for center
+        int centerSteps = 11,          // grid steps for center search
+        out Point2f[] inliers)         // filtered points (ear removed)
     {
         if (contour == null || contour.Length < 20)
             throw new ArgumentException("Contour too small.");
 
-        // ---------- 1) PCA orientation ----------
-        // Build Nx2 float matrix
-        using var ptsMat = new Mat(contour.Length, 2, MatType.CV_32F);
-        for (int i = 0; i < contour.Length; i++)
+        // --- initial guess angle from min area rect (more stable than PCA for rectangles) ---
+        var rr = Cv2.MinAreaRect(contour);
+        float a0 = rr.Angle;
+
+        // OpenCV angle conventions can swap width/height; normalize so angle refers to expectedW direction
+        float w0 = rr.Size.Width;
+        float h0 = rr.Size.Height;
+        // If rr "width" corresponds more to expectedH, rotate by 90 so axis aligns better
+        if (Math.Abs(w0 - expectedH) < Math.Abs(w0 - expectedW))
+            a0 += 90f;
+
+        // Use mean as rotation center for numerical stability
+        var mean = new Point2f((float)contour.Average(p => p.X), (float)contour.Average(p => p.Y));
+
+        // Preconvert to Point2f
+        var pts = contour.Select(p => new Point2f(p.X, p.Y)).ToArray();
+
+        int bestScore = int.MinValue;
+        float bestAngle = a0;
+        float bestCxR = 0, bestCyR = 0;   // best center in rotated coords
+        Point2f[] bestInliersR = Array.Empty<Point2f>();
+        Point2f[] bestRotPts = Array.Empty<Point2f>();
+
+        // --- angle search ---
+        for (int ia = 0; ia < angleSteps; ia++)
         {
-            ptsMat.Set(i, 0, (float)contour[i].X);
-            ptsMat.Set(i, 1, (float)contour[i].Y);
-        }
+            float t = angleSteps == 1 ? 0 : ia / (float)(angleSteps - 1);
+            float ang = a0 + Lerp(-angleSearchDeg, angleSearchDeg, t);
 
-        using var mean = new Mat();
-        using var evecs = new Mat();
-        Cv2.PCACompute(ptsMat, mean, evecs);
+            // rotate points by -ang
+            var rotPts = RotatePoints(pts, mean, -ang);
 
-        float cx = mean.At<float>(0, 0);
-        float cy = mean.At<float>(0, 1);
+            // robust initial center: median in rotated space
+            float medX = Median(rotPts.Select(p => p.X).ToArray());
+            float medY = Median(rotPts.Select(p => p.Y).ToArray());
 
-        float vx = evecs.At<float>(0, 0);
-        float vy = evecs.At<float>(0, 1);
-        double angle = Math.Atan2(vy, vx);
+            float dxMax = expectedW * centerSearchFrac;
+            float dyMax = expectedH * centerSearchFrac;
 
-        // Rotate by -angle to align dominant axis with X
-        double ca = Math.Cos(-angle), sa = Math.Sin(-angle);
-
-        Point2f[] rotPts = new Point2f[contour.Length];
-        for (int i = 0; i < contour.Length; i++)
-        {
-            float x = contour[i].X - cx;
-            float y = contour[i].Y - cy;
-            float xr = (float)(x * ca - y * sa);
-            float yr = (float)(x * sa + y * ca);
-            rotPts[i] = new Point2f(xr, yr);
-        }
-
-        // ---------- 2) Initial center estimate (median is robust to the ear) ----------
-        float medX = Median(rotPts.Select(p => p.X).ToArray());
-        float medY = Median(rotPts.Select(p => p.Y).ToArray());
-
-        // ---------- 3) Grid search for best center (max inliers near expected edges) ----------
-        float dxMax = expectedW * centerSearchFrac;
-        float dyMax = expectedH * centerSearchFrac;
-
-        int bestCount = -1;
-        float bestCxR = medX, bestCyR = medY;
-
-        for (int ix = 0; ix < searchSteps; ix++)
-        {
-            float tx = Lerp(-dxMax, dxMax, ix / (float)(searchSteps - 1));
-            for (int iy = 0; iy < searchSteps; iy++)
+            // center grid search
+            for (int ix = 0; ix < centerSteps; ix++)
             {
-                float ty = Lerp(-dyMax, dyMax, iy / (float)(searchSteps - 1));
-                float cxr = medX + tx;
-                float cyr = medY + ty;
-
-                int count = CountEdgeInliers(rotPts, cxr, cyr, expectedW, expectedH, edgeTolPx, alongTolPx);
-                if (count > bestCount)
+                float cxr = medX + Lerp(-dxMax, dxMax, centerSteps == 1 ? 0 : ix / (float)(centerSteps - 1));
+                for (int iy = 0; iy < centerSteps; iy++)
                 {
-                    bestCount = count;
-                    bestCxR = cxr;
-                    bestCyR = cyr;
+                    float cyr = medY + Lerp(-dyMax, dyMax, centerSteps == 1 ? 0 : iy / (float)(centerSteps - 1));
+
+                    ScoreRect(rotPts, cxr, cyr, expectedW, expectedH, edgeTolPx, alongTolPx,
+                              out int inlierCount, out int outsideCount, out Point2f[] inl);
+
+                    // score: reward inliers, penalize points far from the rectangle (ear tends to increase outsideCount)
+                    int score = inlierCount - 2 * outsideCount;
+
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestAngle = ang;
+                        bestCxR = cxr;
+                        bestCyR = cyr;
+                        bestInliersR = inl;
+                        bestRotPts = rotPts;
+                    }
                 }
             }
         }
 
-        // ---------- 4) Define rectangle edges in rotated space ----------
+        // Build best rectangle walls in rotated space
         float left   = bestCxR - expectedW * 0.5f;
         float right  = bestCxR + expectedW * 0.5f;
         float top    = bestCyR - expectedH * 0.5f;
         float bottom = bestCyR + expectedH * 0.5f;
 
-        // ---------- 5) Filter ear: keep only points close to any edge ----------
-        var inliersR = rotPts.Where(p => IsNearAnyEdge(p, left, right, top, bottom, edgeTolPx, alongTolPx))
-                             .ToArray();
-
-        // ---------- 6) Build wall segments in rotated space ----------
         var leftSegR   = (new Point2f(left,  top),    new Point2f(left,  bottom));
         var rightSegR  = (new Point2f(right, top),    new Point2f(right, bottom));
         var topSegR    = (new Point2f(left,  top),    new Point2f(right, top));
         var bottomSegR = (new Point2f(left,  bottom), new Point2f(right, bottom));
 
-        // ---------- 7) Rotate back to original space ----------
-        double cb = Math.Cos(angle), sb = Math.Sin(angle);
-
-        Point2f Unrotate(Point2f p)
+        // Rotate back to image coords by +bestAngle
+        Point2f Unrotate(Point2f pr) => RotatePoint(pr, new Point2f(0,0), bestAngle); // angle only
+        // But our rotated points were around 'mean'. So undo properly:
+        Point2f Back(Point2f pr)
         {
-            // p is in rotated coords centered at (bestCxR, bestCyR)??? No:
-            // our rotated coords are centered at PCA mean (cx,cy) but not translated by best center.
-            // So we just unrotate and add back (cx,cy).
-            float x = p.X;
-            float y = p.Y;
-            float xo = (float)(x * cb - y * sb) + cx;
-            float yo = (float)(x * sb + y * cb) + cy;
-            return new Point2f(xo, yo);
+            // pr is in rotated frame centered at mean (because RotatePoints did that),
+            // so rotate back around origin then translate back.
+            var p0 = new Point2f(pr.X, pr.Y);
+            var p1 = RotatePoint(p0, new Point2f(0,0), bestAngle);
+            return new Point2f(p1.X + mean.X, p1.Y + mean.Y);
         }
 
-        inliersOriginal = inliersR.Select(Unrotate).ToArray();
-
-        (Point2f, Point2f) Back((Point2f A, Point2f B) s) => (Unrotate(s.A), Unrotate(s.B));
+        inliers = bestInliersR.Select(Back).ToArray();
 
         return new[]
         {
-            Back(leftSegR),
-            Back(rightSegR),
-            Back(topSegR),
-            Back(bottomSegR),
+            (Back(leftSegR.Item1),   Back(leftSegR.Item2)),   // left
+            (Back(rightSegR.Item1),  Back(rightSegR.Item2)),  // right
+            (Back(topSegR.Item1),    Back(topSegR.Item2)),    // top
+            (Back(bottomSegR.Item1), Back(bottomSegR.Item2)), // bottom
         };
     }
 
-    // --- helpers ---
-    private static int CountEdgeInliers(Point2f[] pts, float cX, float cY, float w, float h, float edgeTol, float alongTol)
+    // --- scoring: count points near any of the 4 walls; also count points clearly outside the rectangle ---
+    private static void ScoreRect(Point2f[] rotPts, float cx, float cy, float w, float h, float edgeTol, float alongTol,
+                                  out int inlierCount, out int outsideCount, out Point2f[] inliers)
     {
-        float left = cX - w * 0.5f, right = cX + w * 0.5f;
-        float top = cY - h * 0.5f, bottom = cY + h * 0.5f;
+        float left = cx - w * 0.5f, right = cx + w * 0.5f;
+        float top = cy - h * 0.5f, bottom = cy + h * 0.5f;
 
-        int count = 0;
-        for (int i = 0; i < pts.Length; i++)
-            if (IsNearAnyEdge(pts[i], left, right, top, bottom, edgeTol, alongTol))
-                count++;
-        return count;
+        var inl = new List<Point2f>(rotPts.Length);
+        int outCnt = 0;
+
+        foreach (var p in rotPts)
+        {
+            bool near =
+                (Math.Abs(p.X - left)  <= edgeTol && p.Y >= top - alongTol && p.Y <= bottom + alongTol) ||
+                (Math.Abs(p.X - right) <= edgeTol && p.Y >= top - alongTol && p.Y <= bottom + alongTol) ||
+                (Math.Abs(p.Y - top)   <= edgeTol && p.X >= left - alongTol && p.X <= right + alongTol) ||
+                (Math.Abs(p.Y - bottom)<= edgeTol && p.X >= left - alongTol && p.X <= right + alongTol);
+
+            if (near) inl.Add(p);
+
+            // "outside" = clearly beyond the expected rectangle by more than alongTol
+            if (p.X < left - alongTol || p.X > right + alongTol || p.Y < top - alongTol || p.Y > bottom + alongTol)
+                outCnt++;
+        }
+
+        inliers = inl.ToArray();
+        inlierCount = inliers.Length;
+        outsideCount = outCnt;
     }
 
-    private static bool IsNearAnyEdge(Point2f p, float left, float right, float top, float bottom, float edgeTol, float alongTol)
+    // --- geometry helpers ---
+    private static Point2f[] RotatePoints(Point2f[] pts, Point2f center, float angleDeg)
     {
-        // close to vertical edges AND within y-range (with slack)
-        bool nearLeft  = Math.Abs(p.X - left)  <= edgeTol && p.Y >= top - alongTol && p.Y <= bottom + alongTol;
-        bool nearRight = Math.Abs(p.X - right) <= edgeTol && p.Y >= top - alongTol && p.Y <= bottom + alongTol;
+        double a = angleDeg * Math.PI / 180.0;
+        double c = Math.Cos(a), s = Math.Sin(a);
 
-        // close to horizontal edges AND within x-range (with slack)
-        bool nearTop    = Math.Abs(p.Y - top)    <= edgeTol && p.X >= left - alongTol && p.X <= right + alongTol;
-        bool nearBottom = Math.Abs(p.Y - bottom) <= edgeTol && p.X >= left - alongTol && p.X <= right + alongTol;
+        var outPts = new Point2f[pts.Length];
+        for (int i = 0; i < pts.Length; i++)
+        {
+            float x = pts[i].X - center.X;
+            float y = pts[i].Y - center.Y;
+            float xr = (float)(x * c - y * s);
+            float yr = (float)(x * s + y * c);
+            outPts[i] = new Point2f(xr, yr);
+        }
+        return outPts;
+    }
 
-        return nearLeft || nearRight || nearTop || nearBottom;
+    private static Point2f RotatePoint(Point2f p, Point2f center, float angleDeg)
+    {
+        double a = angleDeg * Math.PI / 180.0;
+        double c = Math.Cos(a), s = Math.Sin(a);
+        float x = p.X - center.X;
+        float y = p.Y - center.Y;
+        return new Point2f((float)(x * c - y * s) + center.X, (float)(x * s + y * c) + center.Y);
     }
 
     private static float Median(float[] a)
@@ -163,16 +189,25 @@ public static class RectWallsExpectedSize
     private static float Lerp(float a, float b, float t) => a + (b - a) * t;
 }
 
+
+
 Point2f[] inliers;
-var walls = RectWallsExpectedSize.FindWallsAndFilterEar(
+var walls = FixedSizeRectFit.FindWallsFixedSize(
     contour,
-    expectedW: 200, expectedH: 120,
-    edgeTolPx: 3, alongTolPx: 6,
+    expectedW: 220, expectedH: 180,
+    edgeTolPx: 3,
+    alongTolPx: 10,
+    angleSearchDeg: 30,
+    angleSteps: 61,
     out inliers
 );
 
-// walls[0]=left, [1]=right, [2]=top, [3]=bottom
+// draw walls
 Cv2.Line(img, (Point)walls[0].A, (Point)walls[0].B, Scalar.Lime, 2);
 Cv2.Line(img, (Point)walls[1].A, (Point)walls[1].B, Scalar.Lime, 2);
 Cv2.Line(img, (Point)walls[2].A, (Point)walls[2].B, Scalar.Lime, 2);
 Cv2.Line(img, (Point)walls[3].A, (Point)walls[3].B, Scalar.Lime, 2);
+
+// optional: visualize inliers (ear removed)
+foreach (var p in inliers)
+    Cv2.Circle(img, (Point)p, 1, Scalar.Cyan, -1);
