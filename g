@@ -152,3 +152,12 @@ public static class MouseEarCornerFinder
         return (a, b);
     }
 }
+
+// corners must be the 4 rectangle corners (ideally TL,TR,BR,BL)
+Point2f opposite = MouseEarCornerFinder.FindCornerOppositeMouseEar(
+    gray,
+    corners,
+    probeW: 60,   // choose based on your expected rectangle size
+    probeH: 60,
+    whiteThreshold: null // use Otsu, or set e.g. 200 if you know it
+);
