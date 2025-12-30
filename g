@@ -77,3 +77,49 @@ public static class PlaneMetrics
         rmsError     = Math.Sqrt(sumSq / nPts);    // RMS distance
     }
 }
+
+public static Point3DCollection RemovePointsOutsideMargin(
+    Point3DCollection points,
+    PlaneFitResult plane,
+    double margin = 0.0)
+{
+    // Defensive checks
+    if (points == null || points.Count == 0)
+        return new Point3DCollection();
+
+    if (plane == null)
+        throw new ArgumentNullException(nameof(plane));
+
+    // Prepare result collection
+    var result = new Point3DCollection(points.Count);
+
+    // Normalized plane normal
+    Vector3D n = plane.Normal;
+    if (n.LengthSquared == 0)
+        throw new InvalidOperationException("Plane normal has zero length.");
+    n.Normalize();
+
+    // Any point on the plane – we’ll use the centroid
+    Point3D p0 = plane.Centroid;
+
+    bool useMargin = margin > 0;
+
+    foreach (var p in points)
+    {
+        // Vector from plane reference point to point
+        var v = new Vector3D(p.X - p0.X, p.Y - p0.Y, p.Z - p0.Z);
+
+        // Signed distance along plane normal
+        double d = Vector3D.DotProduct(v, n);
+
+        // If margin <= 0, keep everything.
+        // Otherwise, keep only points whose distance to the plane
+        // is within ±margin.
+        if (!useMargin || Math.Abs(d) <= margin)
+        {
+            result.Add(p);
+        }
+    }
+
+    return result;
+}
