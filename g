@@ -1,43 +1,45 @@
 using System;
 using System.Collections.Generic;
-using System.Drawing;
 using System.Linq;
+using OpenCvSharp;
 
-public static class BestFitRectSegments
+public static class BestFitRectOpenCvSharp
 {
     /// <summary>
-    /// Fits a best-fit rectangle to a rectangular-ish contour and returns its 4 edges as segments:
-    /// (TL->TR), (TR->BR), (BR->BL), (BL->TL).
-    ///
-    /// contour: list of points on the contour
-    /// trimQuantile: trims outliers when estimating side extremes (0..0.49)
-    /// iterations: refit+reassign iterations (>=1)
+    /// Best-fit rectangle (as 4 line segments) from a rectangular-ish contour.
+    /// Returns 4 segments: (TL->TR), (TR->BR), (BR->BL), (BL->TL)
     /// </summary>
-    public static List<(PointF a, PointF b)> FitBestRectangleSegments(
-        IReadOnlyList<PointF> contour,
+    public static List<(Point2f a, Point2f b)> FitBestRectangleSegments(
+        Point[] contour,
         double trimQuantile = 0.02,
         int iterations = 2)
     {
-        if (contour == null || contour.Count < 4)
+        if (contour == null || contour.Length < 4)
             throw new ArgumentException("Contour must have at least 4 points.");
+
         trimQuantile = Math.Clamp(trimQuantile, 0.0, 0.49);
         iterations = Math.Max(1, iterations);
 
-        int n = contour.Count;
+        int n = contour.Length;
+
+        // Convert to double[][] for math
+        double[][] pts = new double[n][];
+        for (int i = 0; i < n; i++)
+            pts[i] = new double[] { contour[i].X, contour[i].Y };
 
         // centroid
-        var c = Mean(contour); // double[2]
+        double[] c = Mean(pts);
 
         // PCA axes u (principal) and v (perpendicular)
-        var (u, v) = PcaAxes2D(contour, c); // each double[2]
+        (double[] u, double[] v) = PcaAxes2D(pts, c);
 
         // project to PCA frame
         double[] s = new double[n];
         double[] t = new double[n];
         for (int i = 0; i < n; i++)
         {
-            double dx = contour[i].X - c[0];
-            double dy = contour[i].Y - c[1];
+            double dx = pts[i][0] - c[0];
+            double dy = pts[i][1] - c[1];
             s[i] = dx * u[0] + dy * u[1];
             t[i] = dx * v[0] + dy * v[1];
         }
@@ -53,20 +55,20 @@ public static class BestFitRectSegments
         for (int i = 0; i < n; i++)
             labels[i] = AssignInitialSide(s[i], t[i], sMin, sMax, tMin, tMax);
 
-        // lines: left,right,top,bottom as double[3] = {a,b,c}, ax+by+c=0, (a,b) normalized
+        // lines: left,right,top,bottom => each double[3] = {a,b,c} for ax+by+c=0, (a,b) normalized
         double[][] lines = new double[4][];
 
         for (int it = 0; it < iterations; it++)
         {
-            lines[0] = FitLineTLS(GetGroup(contour, labels, 0), contour, s, sMin); // left
-            lines[1] = FitLineTLS(GetGroup(contour, labels, 1), contour, s, sMax); // right
-            lines[2] = FitLineTLS(GetGroup(contour, labels, 2), contour, t, tMax); // top
-            lines[3] = FitLineTLS(GetGroup(contour, labels, 3), contour, t, tMin); // bottom
+            lines[0] = FitLineTLS(GetGroup(pts, labels, 0), pts, s, sMin); // left
+            lines[1] = FitLineTLS(GetGroup(pts, labels, 1), pts, s, sMax); // right
+            lines[2] = FitLineTLS(GetGroup(pts, labels, 2), pts, t, tMax); // top
+            lines[3] = FitLineTLS(GetGroup(pts, labels, 3), pts, t, tMin); // bottom
 
-            // reassign points to nearest line
+            // reassign to nearest line
             for (int i = 0; i < n; i++)
             {
-                double x = contour[i].X, y = contour[i].Y;
+                double x = pts[i][0], y = pts[i][1];
 
                 double bestD = DistLine(lines[0], x, y);
                 int bestK = 0;
@@ -85,12 +87,12 @@ public static class BestFitRectSegments
         double[] BRd = Intersect(lines[3], lines[1]);
         double[] BLd = Intersect(lines[3], lines[0]);
 
-        PointF TL = new((float)TLd[0], (float)TLd[1]);
-        PointF TR = new((float)TRd[0], (float)TRd[1]);
-        PointF BR = new((float)BRd[0], (float)BRd[1]);
-        PointF BL = new((float)BLd[0], (float)BLd[1]);
+        Point2f TL = new((float)TLd[0], (float)TLd[1]);
+        Point2f TR = new((float)TRd[0], (float)TRd[1]);
+        Point2f BR = new((float)BRd[0], (float)BRd[1]);
+        Point2f BL = new((float)BLd[0], (float)BLd[1]);
 
-        return new List<(PointF a, PointF b)>
+        return new List<(Point2f a, Point2f b)>
         {
             (TL, TR),
             (TR, BR),
@@ -99,24 +101,24 @@ public static class BestFitRectSegments
         };
     }
 
-    // ---------------- helpers ----------------
+    // ---------------- helpers (no custom data types) ----------------
 
-    private static double[] Mean(IReadOnlyList<PointF> pts)
+    private static double[] Mean(double[][] pts)
     {
         double sx = 0, sy = 0;
-        for (int i = 0; i < pts.Count; i++) { sx += pts[i].X; sy += pts[i].Y; }
-        return new[] { sx / pts.Count, sy / pts.Count };
+        for (int i = 0; i < pts.Length; i++) { sx += pts[i][0]; sy += pts[i][1]; }
+        return new[] { sx / pts.Length, sy / pts.Length };
     }
 
-    private static (double[] u, double[] v) PcaAxes2D(IReadOnlyList<PointF> pts, double[] c)
+    private static (double[] u, double[] v) PcaAxes2D(double[][] pts, double[] c)
     {
         double sxx = 0, sxy = 0, syy = 0;
-        int n = pts.Count;
+        int n = pts.Length;
 
         for (int i = 0; i < n; i++)
         {
-            double dx = pts[i].X - c[0];
-            double dy = pts[i].Y - c[1];
+            double dx = pts[i][0] - c[0];
+            double dy = pts[i][1] - c[1];
             sxx += dx * dx;
             sxy += dx * dy;
             syy += dy * dy;
@@ -125,6 +127,7 @@ public static class BestFitRectSegments
         double inv = 1.0 / Math.Max(1, n - 1);
         sxx *= inv; sxy *= inv; syy *= inv;
 
+        // largest eigenvector of 2x2 covariance
         double tr = sxx + syy;
         double det = sxx * syy - sxy * sxy;
         double disc = Math.Sqrt(Math.Max(0.0, tr * tr - 4.0 * det));
@@ -146,7 +149,8 @@ public static class BestFitRectSegments
         if (un < 1e-12) { ux = 1; uy = 0; un = 1; }
         ux /= un; uy /= un;
 
-        double vx = -uy, vy = ux; // perpendicular
+        // v perpendicular to u
+        double vx = -uy, vy = ux;
         return (new[] { ux, uy }, new[] { vx, vy });
     }
 
@@ -165,47 +169,45 @@ public static class BestFitRectSegments
         return side;
     }
 
-    private static List<PointF> GetGroup(IReadOnlyList<PointF> pts, int[] labels, int side)
+    private static double[][] GetGroup(double[][] pts, int[] labels, int side)
     {
-        var g = new List<PointF>();
-        for (int i = 0; i < pts.Count; i++)
+        var g = new List<double[]>();
+        for (int i = 0; i < pts.Length; i++)
             if (labels[i] == side)
                 g.Add(pts[i]);
-        return g;
+        return g.ToArray();
     }
 
-    private static double[] FitLineTLS(List<PointF> group, IReadOnlyList<PointF> allPts, double[] coord, double extreme)
+    private static double[] FitLineTLS(double[][] group, double[][] allPts, double[] coord, double extreme)
     {
-        // fallback: closest points to expected extreme
-        if (group.Count < 10)
+        // fallback: pick points closest to expected extreme
+        if (group.Length < 10)
         {
-            int n = allPts.Count;
+            int n = allPts.Length;
             int take = Math.Max(10, n / 20);
-            var idx = Enumerable.Range(0, n)
-                .OrderBy(i => Math.Abs(coord[i] - extreme))
-                .Take(take)
-                .ToArray();
-
-            group = idx.Select(i => allPts[i]).ToList();
+            int[] idx = Enumerable.Range(0, n)
+                                  .OrderBy(i => Math.Abs(coord[i] - extreme))
+                                  .Take(take)
+                                  .ToArray();
+            group = idx.Select(i => allPts[i]).ToArray();
         }
 
         // mean
         double mx = 0, my = 0;
-        for (int i = 0; i < group.Count; i++) { mx += group[i].X; my += group[i].Y; }
-        mx /= group.Count; my /= group.Count;
+        for (int i = 0; i < group.Length; i++) { mx += group[i][0]; my += group[i][1]; }
+        mx /= group.Length; my /= group.Length;
 
         // covariance
         double sxx = 0, sxy = 0, syy = 0;
-        for (int i = 0; i < group.Count; i++)
+        for (int i = 0; i < group.Length; i++)
         {
-            double dx = group[i].X - mx;
-            double dy = group[i].Y - my;
+            double dx = group[i][0] - mx;
+            double dy = group[i][1] - my;
             sxx += dx * dx;
             sxy += dx * dy;
             syy += dy * dy;
         }
-
-        double inv = 1.0 / Math.Max(1, group.Count - 1);
+        double inv = 1.0 / Math.Max(1, group.Length - 1);
         sxx *= inv; sxy *= inv; syy *= inv;
 
         // smallest eigenvector => normal (a,b)
@@ -240,7 +242,7 @@ public static class BestFitRectSegments
     }
 
     private static double DistLine(double[] line, double x, double y)
-        => Math.Abs(line[0] * x + line[1] * y + line[2]);
+        => Math.Abs(line[0] * x + line[1] * y + line[2]); // (a,b) normalized
 
     private static double[] Intersect(double[] l1, double[] l2)
     {
