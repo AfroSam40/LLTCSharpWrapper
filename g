@@ -1,1 +1,3 @@
-TIM has to be applied to design to meet satellite thermal performance. The goal of inspection is to remove unmonitored variability—things like nozzle-to-surface standoff, material behavior like viscosity, and surface prep differences. By measuring the dispense, we can standardize expectations, catch drift early, and make results consistent across operators, tools, and builds
+First, volume. We’re targeting ±10% of the requested dispense, across a pretty wide range—from 0.1 cc up to 100 cc—so the process is repeatable regardless of shot size.
+Second, location. We want each blob placed within 2 mm true position in XY, so recipe points reliably map to what actually gets dispensed.
+Third, shape and height control. We’re holding Z within ±0.2 mm to keep the stand-off consistent and avoid defects like pancakes, tails, or “poo” blobs.
