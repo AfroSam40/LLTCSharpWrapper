@@ -1,2 +1,1 @@
-Once we have the bitmap, we first apply a morphological close to fill small gaps and clean up the fiducial silhouette. Then we extract the outer contour and fit a minimum-area rectangle, which gives us a stable set of four corners and the fiducial’s rotation.
-From there, we identify the “mouse-ear” corner as the corner with the smallest local intensity/feature signature, and we define the origin as the corner opposite that mouse ear.
+We already know the nominal dispense location, so post-dispense we start by cropping a tight ROI around the expected blob site. Then we reuse the pre-dispense best-fit plane as our reference surface—subtract that plane to remove the background and isolate just the blob’s point cloud for measurement.
