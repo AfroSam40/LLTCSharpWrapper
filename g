@@ -1,3 +1,2 @@
-First, volume. We’re targeting ±10% of the requested dispense, across a pretty wide range—from 0.1 cc up to 100 cc—so the process is repeatable regardless of shot size.
-Second, location. We want each blob placed within 2 mm true position in XY, so recipe points reliably map to what actually gets dispensed.
-Third, shape and height control. We’re holding Z within ±0.2 mm to keep the stand-off consistent and avoid defects like pancakes, tails, or “poo” blobs.
+Once we have the bitmap, we first apply a morphological close to fill small gaps and clean up the fiducial silhouette. Then we extract the outer contour and fit a minimum-area rectangle, which gives us a stable set of four corners and the fiducial’s rotation.
+From there, we identify the “mouse-ear” corner as the corner with the smallest local intensity/feature signature, and we define the origin as the corner opposite that mouse ear.
