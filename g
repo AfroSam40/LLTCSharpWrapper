@@ -1,36 +1,53 @@
-import os
-import struct
-from typing import List, Tuple
+/////////////////////////////////////////////////
+// ScanMove() FUNCTION
+/////////////////////////////////////////////////
+{FUNCTION ScanMove}
+VAR_EXTERNAL
+    R300 : LREAL; // ScanStartX
+    R301 : LREAL; // ScanEndX
+    R302 : LREAL; // ScanZ
+    R303 : LREAL; // ScanFeed
+    R304 : LREAL; // LeadInDist
+    R305 : LREAL; // SafeZ
+    R306 : LREAL; // RapidFeed
+END_VAR
 
-def load_point_cloud(file_path: str) -> List[Tuple[float, float, float]]:
-    if not file_path or not str(file_path).strip():
-        raise ValueError("file_path is null/empty/whitespace")
+VAR
+    xLeadIn : LREAL;
+    xLeadOut : LREAL;
+END_VAR
 
-    if not os.path.isfile(file_path):
-        raise FileNotFoundError(file_path)
+    // Compute lead in/out
+    xLeadIn  := R300 - R304;
+    xLeadOut := R301 + R304;
 
-    points: List[Tuple[float, float, float]] = []
+    // 1) Go safe
+    !G90
+    !G01 Z=R305 F=R306
+    sync()
 
-    with open(file_path, "rb") as f:
-        # C# BinaryReader.ReadInt32() => 4 bytes (little-endian on Windows/.NET)
-        raw = f.read(4)
-        if len(raw) != 4:
-            raise EOFError("File too short: missing point count (int32)")
-        (count,) = struct.unpack("<i", raw)
+    // 2) Move to lead-in start
+    !G01 X=xLeadIn F=R306
+    sync()
 
-        if count < 0:
-            raise ValueError(f"Invalid point count: {count}")
+    // 3) Go to scan height
+    !G01 Z=R302 F=R306
+    sync()
 
-        # Each point = 3 doubles = 24 bytes
-        bytes_needed = count * 24
-        data = f.read(bytes_needed)
-        if len(data) != bytes_needed:
-            raise EOFError(f"File too short: expected {bytes_needed} bytes of point data, got {len(data)}")
+    // 4) Arm scan device (PLC handles this M-code)
+    !M60
+    sync()
 
-        # Unpack all doubles at once (faster than looping reads)
-        doubles = struct.unpack("<" + "d" * (count * 3), data)
+    // 5) Do scan move (steady feed)
+    !G01 X=xLeadOut F=R303
+    sync()
 
-        # Group into (x,y,z)
-        points = [(doubles[i], doubles[i+1], doubles[i+2]) for i in range(0, len(doubles), 3)]
+    // 6) Disarm scan
+    !M61
+    sync()
 
-    return points
+    // 7) Back to safe
+    !G01 Z=R305 F=R306
+    sync()
+
+END_FUNCTION}
