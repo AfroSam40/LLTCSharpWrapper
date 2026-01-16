@@ -1,583 +1,77 @@
-Got you. What you’re looking at is TwinCAT NC I “interpreter programs” (NCI), and they’re not just “pure ISO G-code”.
-
-It’s more like this:
-
-> NC I program = a small programming language (ST-ish)
-+ embedded G-code blocks
-+ a shared “mailbox” of numeric registers (R-parameters) to talk to the PLC
-
-
-
-Below is a high-level architecture first, then a deep breakdown of what each piece in your screenshots is doing.
-
-
----
-
-1) High-level architecture (what’s running where)
-
-The moving parts in a TwinCAT motion system
-
-1. Drives / EtherCAT
-Your servo drives are on EtherCAT.
-
-
-2. NC Axes + an NC Channel (Interpolator)
-TwinCAT NC has “axes” and “groups” and a channel (the thing we discussed earlier) that runs the interpolation cycle and generates setpoints.
-
-
-3. NC I Interpreter (your .nc text program)
-This is a runtime that reads your .nc program, interprets it, and feeds the channel’s motion queue.
-
-
-4. PLC (supervisor / state machine)
-PLC typically decides what to do next and passes parameters to NC I using:
-
-R-parameters (R181, R184, R166, etc.)
-
-M-codes (M10, M50, M51, …) for handshakes/events
-
-Optional other interfaces, but R+M is the classic pattern.
-
-
-
-
-The big pattern your code uses
-
-Your code is built like a motion “router”:
-
-PLC writes control values into R-registers
-
-NC I “Master” program runs in a loop:
-
-reads R181 to choose which routine to run
-
-reads lots of other Rxxx values for positions, speeds, transforms
-
-calls library functions that execute motion blocks (G01, G90, etc.)
-
-
-M-codes are used like signals between NC and PLC:
-
-“Start process”
-
-“Enable sensor”
-
-“Process finished”
-
-etc.
-
-
-
-
----
-
-2) What kind of “G-code” is this?
-
-It’s not just raw ISO G-code
-
-Your files contain things like:
-
-VAR, END_VAR, typed variables (LREAL, arrays)
-
-IF ... THEN, WHILE, FOR, CASE
-
-function calls: transTranslate(...), frameGet(...), msg(...)
-
-#include "GantryBaseLibrary.nc"
-
-
-That is NC I scripting (Beckhoff’s interpreter language).
-
-The ! prefix is the key
-
-In your library routines you have many lines like:
-
-!N12 G01 X=R166 Y=R167
-
-That ! is essentially:
-✅ “Send this as an NC block (G/M-code line) to the interpreter.”
-
-Whereas lines without ! are interpreted as script statements (the ST-like stuff).
-
-So:
-
-Script decides logic, variables, loops, which routine to call
-
-NC blocks (!G01, !G90, !M50, …) actually command motion / machine functions
-
-
-
----
-
-3) How the files you showed fit together
-
-A) GantryMaster.nc (the “main program”)
-
-This is the dispatcher:
-
-sets modes (metric, abs, plane, etc.)
-
-applies coordinate transforms from R-registers
-
-loops and runs one of several processes based on R181
-
-
-B) GantryBaseLibrary.nc (macro library / motion routines)
-
-This is where the “real motion recipes” live:
-
-BaseMove3D()
-
-BlobMove(...)
-
-InchUntilTrigger()
-
-SampleProcessMove() / helix / etc.
-
-
-Each function:
-
-declares which R-registers it uses (VAR_EXTERNAL)
-
-uses a safe motion pattern (Z safe → XY → Z final)
-
-uses M-codes and sync points to coordinate with PLC/hardware
-
-
-C) GantryBaseEnums.nc and GantryBaseStructs.nc
-
-Enums defines readable names for numeric process IDs (like a menu)
-
-Structs defines types like ST_POINT (X,Y,Z)
-
-
-One thing I noticed: your enum screenshot shows only 0..3, but your master uses CASE R181 OF ... 4: too (PTP). That’s not “wrong”, it just means the enum file might be older/incomplete vs master.
-
-
----
-
-4) The “glue”: R-parameters, M-codes, and sync()
-
-R-parameters (Rxxx)
-
-These are basically global numeric registers the PLC and NCI program both can read/write.
-
-In your code they act like:
-
-Inputs from PLC: positions, feedrates, transforms, mode selection
-
-Data blobs: arrays in R200.. that you pull into RArray[]
-
-
-Examples from your code:
-
-R181 = process selector (menu choice)
-
-R182 = “keep running / stop” flag (master WHILE condition)
-
-R184..R186 = translation X/Y/Z for a work coordinate transform
-
-R187..R189 = rotation X/Y/Z for transform
-
-R166/R167/R168 = target X/Y/Z
-
-R179 = feedrate
-
-R183 = dry-cycle flag (skip motion but print messages)
-
-
-You also use:
-
-rGet(i+200) and rSet(i,0) to read/write R registers programmatically.
-
-
-M-codes (M10, M50, M51, …)
-
-In TwinCAT these are often configured as PLC-handled M functions.
-
-Typical usage pattern:
-
-NC program hits M50 → PLC sees “process start” and turns on some output / enables sensor
-
-NC program hits M51 → PLC sees “process end” and turns it off, logs data, etc.
-
-
-Whether NC waits for PLC depends on how the M-function is configured (sync/async).
-
-sync()
-
-This is super important in NC systems.
-
-Conceptually, sync() is a synchronization point where you force the interpreter to stop “running ahead” and make sure:
-
-previous motion is committed/finished up to that point, and/or
-
-previous M-functions/events are handled in order, and/or
-
-it’s safe to read the current position (frameGet) or switch modes (G90/G91)
-
-
-In your code, sync() is used exactly where you’d want it:
-
-before reading position
-
-around M-code boundaries
-
-before/after mode changes like G91 incremental loops
-
-
-
----
-
-5) Walkthrough: GantryMaster.nc (your main dispatcher)
-
-Header and includes
-
-You have:
-
-comments describing purpose
-
-#include "GantryBaseLibrary.nc"
-
-
-That include makes your function library available.
-
-Variable section
-
-You declare things like:
-
-RArray : ARRAY[0..199] OF LREAL;
-
-i : INT;
-
-maybe transform structs (commented in screenshot)
-
-
-This is script-level memory (not R-registers).
-
-Initialization
-
-You have something like:
-
-G17 G90 G71 (plane XY, absolute, metric)
-
-msg("NC Master Program Initialization")
-
-transRestore(0)
-
-loop FOR i := 0 to 999 DO rSet(i,0); END_FOR; (reset R registers)
-
-
-So the master sets a clean starting state.
-
-Main loop structure
-
-You do:
-
-unitVelocitySet(...) (set units for interpreting feedrates)
-
-some M codes (M10, M20) and sync()
-
-msg("NC Master Program Start")
-
-
-Then:
-
-WHILE (R182 = 0) DO
-
-This means:
-
-as long as PLC keeps R182 = 0, keep servicing commands.
-
-PLC can stop the master by setting R182 non-zero.
-
-
-Apply “Program Transform” into PCS
-
-You do:
-
-transRestore(0)
-
-transTranslate(x:=R184, y:=R185, z:=R186)
-
-transRotZ(angle:=R189) etc.
-
-transScaleAxis(axisNo:=0, factor:=0.99) etc.
-
-
-This means you’re creating a work object coordinate system (PCS) so that the same programmed motions can be “moved/rotated/scaled” to match the real part location.
-
-This is huge in gantries: you can calibrate the workpiece pose in PLC/vision, write it into R184..R189, and the motion program automatically follows that coordinate frame.
-
-Dispatch based on R181
-
-CASE R181 OF
-
-0: EXIT; (stop)
-
-1: run base move + sample process
-
-2: run base move + blob move (loads RArray from R200..)
-
-3: run base move + inch-until-trigger
-
-4: run base move + sample PTP process
-
-ELSE EXIT;
-
-
-This is essentially a “motion service loop”.
-
-Then at the end:
-
-message “complete”
-
-M30 end program
-
-
-
----
-
-6) Walkthrough: key library routines (GantryBaseLibrary.nc)
-
-A) BaseMove3D()
-
-Pattern in your screenshot:
-
-VAR_EXTERNAL declares it uses:
-
-R166 X
-
-R167 Y
-
-R168 final Z
-
-R179 feedrate
-
-R180 safe height Z
-
-R194/R195/R196 offsets
-
-
-
-Then it does:
-
-1. sync()
-
-
-2. move to safe Z (so XY travel is safe)
-
-
-3. apply an additional translation offset (transTranslate(x:=R194, y:=R195, z:=R196))
-
-
-4. move XY to the target
-
-
-5. move Z to final
-
-
-6. optional M-codes around it (M21/M22)
-
-
-
-This is the standard safe gantry move recipe.
-
-
----
-
-B) SampleProcessMove() (your “helix” / complex move)
-
-You’ve got:
-
-external process parameters:
-
-R200 rotations/angle
-
-R201/R202/R203 normal vector components
-
-R204 Z travel
-
-R205 process feedrate
-
-and base targets R166..
-
-
-
-Inside:
-
-checks R183 (dry cycle)
-
-frameGet(...) captures current pose into locals curX/curY/curZ
-
-prints “Performing Helix …”
-
-there’s a commented call like moveCircle3d(...)
-
-
-That moveCircle3d style call is an example of NC I giving you higher-level interpolation than plain G02/G03 in XY. It can do circles/helices in an arbitrary 3D plane using a normal vector.
-
-Then it returns to base position afterward.
-
-So conceptually:
-
-move to start
-
-execute a 3D contour (helix/circle)
-
-go back to a safe/ending pose
-
-
-
----
-
-C) InchUntilTrigger()
-
-This is a classic “creep forward until sensor trips” routine.
-
-You declare external parameters:
-
-home/safe positions
-
-rapid positions (R200..R203)
-
-inch increments (R208..R211)
-
-trigger signal register R216 (your screenshot notes “expects NC falling edge…”)
-
-
-Then logic:
-
-move to safe height
-
-move to a rapid “start” position
-
-switch to incremental: G91
-
-WHILE R216 = 1 DO:
-
-do a small G01 step (X/Y/Z) at inch feed
-
-sync() each loop so PLC gets time to update R216
-
-
-when R216 changes, exit loop
-
-switch back to absolute: G90
-
-
-This is exactly how you bridge:
-
-real-time motion (NC)
-
-with asynchronous sensing (PLC updates the R-register)
-
-
-
----
-
-D) BlobMove(RArray := RArray)
-
-This one is interesting: it looks like you’re feeding a profile from PLC into NC.
-
-You do:
-
-read R200.. into a local RArray[0..199]
-
-the routine uses:
-
-first half as positions
-
-second half as feedrates (you do RArray[i] and RArray[i+100])
-
-
-
-Then for i=1..99:
-
-Position := RArray[i]
-
-FeedRate := RArray[i+100]
-
-if feedrate > 0: G01 Z=Position F=FeedRate
-
-
-Because you also do G91 in that routine, those Z moves are likely incremental steps (unless you switch back to G90 earlier). That’s a common way to do “move through a profile” with variable speed.
-
-Then it ends with a retract / max-speed move and returns to absolute.
-
-
----
-
-7) What you should take away (mental model)
-
-This is not “CAM post → run code”
-
-It’s more like:
-
-PLC is the boss
-
-NC I is the motion engine
-
-R registers are the shared “parameter bus”
-
-M codes are events/handshakes
-
-The .nc code is a reusable motion library + dispatcher
-
-
-So your “G-code” is really a motion API, driven by PLC parameters.
-
-
----
-
-8) Practical “new to TwinCAT” tips for working with this
-
-1. Find where R-registers are written in PLC
-
-Search PLC project for R181, R182, etc.
-That will instantly explain the intended states.
-
-
-
-2. Find M-code mapping
-
-In TwinCAT you can map M-functions to PLC handlers.
-
-That tells you what M50/M51/M52/M53 are supposed to do (enable sensor, start dispense, etc.)
-
-
-
-3. Confirm what sync() means in your configuration
-
-It’s being used as a “don’t run ahead” barrier.
-
-Correct usage depends on whether your M-functions are synchronous and how look-ahead is configured.
-
-
-
-4. Check if your moves are absolute or incremental at each point
-
-Especially in BlobMove and InchUntilTrigger.
-
-G90/G91 mistakes are the #1 way to get “why did it yeet off into space?”
-
-
-
-
-
----
-
-If you want, I can do an even more “forensic” breakdown where I label every Rxxx in your screenshots into a clean table like:
-
-R166: Base X
-
-R167: Base Y
-
-R168: Final Z
-
-R179: Feedrate
-
-etc…
-
-
-…and then explain the full PLC↔NC handshake flow the way you’d document it for the next guy.
+using System;
+using OpenCvSharp;
+
+public static class PoseExtract
+{
+    /// <summary>
+    /// Extracts pose as (Rx, Ry, Rz, Tx, Ty, Tz) from a 3x4 or 4x4 transform.
+    /// Rx/Ry/Rz are Euler angles in radians using ZYX convention:
+    /// R = Rz(Rz) * Ry(Ry) * Rx(Rx)  (yaw, pitch, roll)
+    /// If enforceRigid=true, the 3x3 block is projected to nearest proper rotation (det=+1).
+    /// </summary>
+    public static (double Rx, double Ry, double Rz, double Tx, double Ty, double Tz)
+        ExtractRxyzTxyz(Mat T, bool enforceRigid = true)
+    {
+        if (T == null) throw new ArgumentNullException(nameof(T));
+        if (!((T.Rows == 3 && T.Cols == 4) || (T.Rows == 4 && T.Cols == 4)))
+            throw new ArgumentException("T must be 3x4 or 4x4.", nameof(T));
+
+        // Ensure CV_64F
+        Mat Td = T.Type() == MatType.CV_64F ? T : T.Clone().ConvertTo(new Mat(), MatType.CV_64F);
+
+        // Extract R (3x3)
+        var R = new Mat(3, 3, MatType.CV_64F);
+        Td[new Rect(0, 0, 3, 3)].CopyTo(R);
+
+        // Extract t
+        double tx = Td.At<double>(0, 3);
+        double ty = Td.At<double>(1, 3);
+        double tz = Td.At<double>(2, 3);
+
+        if (enforceRigid)
+            R = NearestProperRotation(R);
+
+        // Euler ZYX: R = Rz * Ry * Rx
+        // ry (pitch) = asin(-r20)
+        double r00 = R.At<double>(0, 0), r01 = R.At<double>(0, 1), r02 = R.At<double>(0, 2);
+        double r10 = R.At<double>(1, 0), r11 = R.At<double>(1, 1), r12 = R.At<double>(1, 2);
+        double r20 = R.At<double>(2, 0), r21 = R.At<double>(2, 1), r22 = R.At<double>(2, 2);
+
+        double ry = Math.Asin(Clamp(-r20, -1.0, 1.0));
+        double cy = Math.Cos(ry);
+
+        double rx, rz;
+        if (Math.Abs(cy) > 1e-12)
+        {
+            rx = Math.Atan2(r21, r22); // roll about X
+            rz = Math.Atan2(r10, r00); // yaw about Z
+        }
+        else
+        {
+            // Gimbal lock: ry ≈ ±90°, choose rx = 0 and compute rz from remaining terms
+            rx = 0.0;
+            rz = Math.Atan2(-r01, r11);
+        }
+
+        return (rx, ry, rz, tx, ty, tz);
+    }
+
+    private static Mat NearestProperRotation(Mat A)
+    {
+        Cv2.SVDecomp(A, out _, out Mat u, out Mat vt);
+        Mat R = u * vt;
+
+        if (Cv2.Determinant(R) < 0.0)
+        {
+            // Flip last column of U to force det=+1
+            u.Set(0, 2, -u.At<double>(0, 2));
+            u.Set(1, 2, -u.At<double>(1, 2));
+            u.Set(2, 2, -u.At<double>(2, 2));
+            R = u * vt;
+        }
+
+        return R;
+    }
+
+    private static double Clamp(double v, double lo, double hi) => v < lo ? lo : (v > hi ? hi : v);
+}
