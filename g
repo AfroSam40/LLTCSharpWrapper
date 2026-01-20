@@ -1,139 +1,51 @@
 using System;
-using TwinCAT.Ads;
+using System.Diagnostics;
+using System.Threading;
+using System.Threading.Tasks;
 
-namespace LLT
+public static class WaitUntil
 {
-    internal class ADS : IDisposable
+    // Sync
+    public static bool Till(Func<bool> condition, TimeSpan timeout, TimeSpan? pollInterval = null)
     {
-        public string AMSNetID;
-        public StateInfo ConnectionState;
+        if (condition == null) throw new ArgumentNullException(nameof(condition));
+        if (timeout < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
 
-        private AdsClient _client;
-        private bool _connected;
+        var poll = pollInterval ?? TimeSpan.FromMilliseconds(10);
+        if (poll <= TimeSpan.Zero) poll = TimeSpan.FromMilliseconds(1);
 
-        public ADS(string AMSNetID = "", int Port = 851)
+        var sw = Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
         {
-            this.AMSNetID = AMSNetID;
-            _client = new AdsClient();
-
-            if (!string.IsNullOrWhiteSpace(AMSNetID))
-                Connect(AMSNetID, Port);
+            if (condition()) return true;
+            Thread.Sleep(poll);
         }
 
-        public bool Connect(string AMSNetID = "", int Port = 851)
+        // One last check right at/after timeout
+        return condition();
+    }
+
+    // Async (preferred if you're on UI thread / don't want to block)
+    public static async Task<bool> TillAsync(
+        Func<bool> condition,
+        TimeSpan timeout,
+        TimeSpan? pollInterval = null,
+        CancellationToken ct = default)
+    {
+        if (condition == null) throw new ArgumentNullException(nameof(condition));
+        if (timeout < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
+
+        var poll = pollInterval ?? TimeSpan.FromMilliseconds(10);
+        if (poll <= TimeSpan.Zero) poll = TimeSpan.FromMilliseconds(1);
+
+        var sw = Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
         {
-            // If caller passes empty, use stored AMSNetID
-            AMSNetID = string.IsNullOrWhiteSpace(AMSNetID) ? this.AMSNetID : AMSNetID;
-            this.AMSNetID = AMSNetID;
-
-            try
-            {
-                if (_connected)
-                    Disconnect();
-
-                _client.Connect(AMSNetID, Port);
-                ConnectionState = _client.ReadState();
-                _connected = (ConnectionState.AdsState == AdsState.Run);
-                return _connected;
-            }
-            catch
-            {
-                _connected = false;
-                return false;
-            }
+            ct.ThrowIfCancellationRequested();
+            if (condition()) return true;
+            await Task.Delay(poll, ct).ConfigureAwait(false);
         }
 
-        public void Disconnect()
-        {
-            try
-            {
-                _client?.Disconnect();
-            }
-            catch { /* ignore */ }
-            _connected = false;
-        }
-
-        /// <summary>
-        /// Writes a PLC symbol by name. Supports scalars + arrays.
-        /// For arrays, pass the array instance (e.g., double[]).
-        /// </summary>
-        public bool WriteVal(string varName, object val)
-        {
-            if (!_connected) return false;
-            if (string.IsNullOrWhiteSpace(varName)) return false;
-            if (val == null) return false;
-
-            int handle = 0;
-
-            try
-            {
-                handle = _client.CreateVariableHandle(varName);
-
-                // WriteAny handles most primitives and arrays as long as the .NET type matches PLC type.
-                // Example: PLC LREAL[] <-> double[]
-                _client.WriteAny(handle, val);
-
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                if (handle != 0)
-                {
-                    try { _client.DeleteVariableHandle(handle); } catch { /* ignore */ }
-                }
-            }
-        }
-
-        /// <summary>
-        /// Strongly-typed write (recommended).
-        /// </summary>
-        public bool WriteVal<T>(string varName, T val)
-        {
-            return WriteVal(varName, (object)val);
-        }
-
-        /// <summary>
-        /// Reads a PLC symbol by name into type T.
-        /// For arrays, use T like double[].
-        /// </summary>
-        public bool ReadVal<T>(string varName, out T value)
-        {
-            value = default;
-            if (!_connected) return false;
-            if (string.IsNullOrWhiteSpace(varName)) return false;
-
-            int handle = 0;
-
-            try
-            {
-                handle = _client.CreateVariableHandle(varName);
-                object obj = _client.ReadAny(handle, typeof(T));
-                value = (T)obj;
-                return true;
-            }
-            catch
-            {
-                value = default;
-                return false;
-            }
-            finally
-            {
-                if (handle != 0)
-                {
-                    try { _client.DeleteVariableHandle(handle); } catch { /* ignore */ }
-                }
-            }
-        }
-
-        public void Dispose()
-        {
-            Disconnect();
-            _client?.Dispose();
-            _client = null;
-        }
+        return condition();
     }
 }
