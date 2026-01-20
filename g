@@ -1,51 +1,17 @@
-using System;
-using System.Diagnostics;
-using System.Threading;
-using System.Threading.Tasks;
-
-public static class WaitUntil
+public bool ReadVal(string varName, Type type, out object value)
 {
-    // Sync
-    public static bool Till(Func<bool> condition, TimeSpan timeout, TimeSpan? pollInterval = null)
+    value = null;
+    if (!_connected) return false;
+
+    int handle = 0;
+    try
     {
-        if (condition == null) throw new ArgumentNullException(nameof(condition));
-        if (timeout < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
-
-        var poll = pollInterval ?? TimeSpan.FromMilliseconds(10);
-        if (poll <= TimeSpan.Zero) poll = TimeSpan.FromMilliseconds(1);
-
-        var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < timeout)
-        {
-            if (condition()) return true;
-            Thread.Sleep(poll);
-        }
-
-        // One last check right at/after timeout
-        return condition();
+        handle = _client.CreateVariableHandle(varName);
+        value = _client.ReadAny(handle, type);
+        return true;
     }
-
-    // Async (preferred if you're on UI thread / don't want to block)
-    public static async Task<bool> TillAsync(
-        Func<bool> condition,
-        TimeSpan timeout,
-        TimeSpan? pollInterval = null,
-        CancellationToken ct = default)
+    finally
     {
-        if (condition == null) throw new ArgumentNullException(nameof(condition));
-        if (timeout < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
-
-        var poll = pollInterval ?? TimeSpan.FromMilliseconds(10);
-        if (poll <= TimeSpan.Zero) poll = TimeSpan.FromMilliseconds(1);
-
-        var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < timeout)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (condition()) return true;
-            await Task.Delay(poll, ct).ConfigureAwait(false);
-        }
-
-        return condition();
+        if (handle != 0) _client.DeleteVariableHandle(handle);
     }
 }
