@@ -1,4 +1,1 @@
-
-Drafted a high-level plan to integrate the scanner into the gantry. The vision process FB will coordinate with the motion EM to execute scan moves, and an NC_J function will provide a generic scan routine using R-parameters to configure scan start position, scan distance, and feed rate.
-
-Material reflectivity will likely require different exposure settings. Metal surfaces may need a shorter exposure (<1 ms), while lower-reflectivity surfaces (e.g., PCBs) may require a longer exposure (>2.5 ms). Note: reducing exposure time can also reduce the scan profile width; based on experiments run so far where lower exposure was required, the maximum observed reduction is approximately 12% of profile width.
+Scan speed is limited by the total cycle time per profile: exposure time plus the processing/transfer time needed to convert the receiver image into a profile. If we move faster than that cycle time supports, the scanner will miss/ignore pulses that occur while it’s still exposing or processing, so we end up with fewer profiles per unit distance (lower point density / gaps).
