@@ -1,17 +1,1 @@
-public bool ReadVal(string varName, Type type, out object value)
-{
-    value = null;
-    if (!_connected) return false;
-
-    int handle = 0;
-    try
-    {
-        handle = _client.CreateVariableHandle(varName);
-        value = _client.ReadAny(handle, type);
-        return true;
-    }
-    finally
-    {
-        if (handle != 0) _client.DeleteVariableHandle(handle);
-    }
-}
+To verify the emulator card was outputting the correct number of pulses, we ran the card at 1 m/s (i.e., 1000 mm/s) and captured a 1000 µs (0.001 s) oscilloscope window. In that time window, the distance traveled is . With the pulse interval set to 0.1 mm per pulse, the expected pulse count is . The captured waveform shows 10 pulses within the 1000 µs window, confirming the emulator card is generating the correct pulse output for the commanded speed and pulse spacing.
