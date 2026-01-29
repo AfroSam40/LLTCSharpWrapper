@@ -1,27 +1,15 @@
 using HelixToolkit.Wpf.SharpDX;
-using SharpDX;
-using System.Linq;
-using System.Windows.Media.Media3D;
 
-public static void SetPointCloud(PointGeometryModel3D model, Point3DCollection pts)
+public MainWindow()
 {
-    if (model == null) throw new ArgumentNullException(nameof(model));
-    if (pts == null || pts.Count == 0)
-    {
-        model.Geometry = null;
-        return;
-    }
+    InitializeComponent();
 
-    var positions = new Vector3Collection(pts.Count);
-    foreach (var p in pts)
-        positions.Add(new Vector3((float)p.X, (float)p.Y, (float)p.Z));
-
-    model.Geometry = new PointGeometry3D
+    Viewport.EffectsManager = new DefaultEffectsManager();
+    Viewport.Camera = new PerspectiveCamera
     {
-        Positions = positions
-        // Colors = optional (see below)
+        Position = new System.Windows.Media.Media3D.Point3D(0, 0, 200),
+        LookDirection = new System.Windows.Media.Media3D.Vector3D(0, 0, -200),
+        UpDirection = new System.Windows.Media.Media3D.Vector3D(0, 1, 0),
+        FarPlaneDistance = 100000
     };
-
-    // If you want a constant color for all points:
-    model.Material = new ColorMaterial { Color = Color4.DodgerBlue };
 }
