@@ -1,19 +1,34 @@
 Hi all,
 
-Wanted to broadcast an update regarding V3 TIM Inspection. The scanner we’ve decided on is Micro-Epsilon’s LLT30x0-430. Full details of qual, trade studies, and findings can be found here:
-https://confluence.spacex.corp/spaces/sfesseha/pages/6866203952/3D+Laser+Scanning+Qual+Findings
+Sharing an update on V3 TIM inspection and the 3D laser scanner selection.
 
-PDR Recap: https://jira.spacex.corp/browse/SLTOOL-27338
+Decision
+We’ve selected Micro-Epsilon’s scanCONTROL LTT30x0-430 as the baseline scanner for V3 TIM inspection.
 
-3D laser scanning will give greater process control by allowing for a greater inspection degree of freedom that 2D vision is unable to do. Scanner will give us the following capabilities:
+References
 
-- XYZ comp with an accuracy of ±0.1 mm
-- Blob/line presence detection with volume measurements to confirm within 10% of expected
+- Qual / trade study / findings: https://confluence.spacex.corp/spaces/~sfesseh/pages/6866203952/3D+Laser+Scanning+Qual+Findings
+- PDR recap: https://jira.spacex.corp/browse/SLTOOL-27338
 
-Key learnings to note:
+Why 3D scanning (vs. 2D vision)
+3D scanning provides improved process control by enabling inspection degrees of freedom that 2D vision can’t support (true height/volume validation and more robust geometry checks). With this scanner we can support:
 
-- Laser triangulation 3D scanners can lose data when tall or steep features block the receiver line of sight. Depending on the feature height, blob or line can be partially or fully shadowed. We have tested various potentially problematic features that partners have pointed out and have not found cases where this will affect us.
-- PCBs will require a long exposure time for a reliable scan. As a result, max speed we’ll be able to scan is 33 mm/s. Blobs/Lines don’t require a long exposure time for a reliable scan and can be scanned at a much higher speed (180 mm/s) so the slower speed for PCBs is only required for predisepse inspection. Slow scanning will still give us a more accurate Z comp than V2 implementation which will improve rework stats.
+- XYZ measurement with ~±0.1 mm accuracy (application-dependent)
+- Blob/line presence detection plus volume measurement, targeting ≤10% vs. expected volume
+
+Key learnings / constraints
+
+- Line-of-sight shadowing: Laser triangulation scanners can lose data when tall/steep features occlude the receiver line of sight. We evaluated partner-flagged geometries and did not find cases that would impact our current features, but this remains a known limitation to keep in mind for future designs.
+- PCB scan speed: PCBs require longer exposure to produce a reliable scan. As a result, max scan speed for PCB surfaces is ~33 mm/s. Blob/line scans do not require long exposure and can run up to ~180 mm/s. The slower speed is therefore primarily a pre-dispense requirement. Even at the slower rate, we still gain a more accurate Z measurement than the V2 approach, which should reduce rework.
+
+Next steps
+
+- Finalize procurement / delivery plan for the LTT30x0-430
+- Build out initial scan “recipes” for: (1) pre-dispense PCB scan, (2) post-dispense blob/line + volume verification
+- Define acceptance criteria and update the V3 TIM inspection spec + MSA plan
+- Track integration actions/risks in the PDR JIRA above
+
+If you have concerns about the line-of-sight limitation for any upcoming geometry, or want specific features added to the scan recipe validation list, please reply here or comment in the JIRA.
 
 Thanks,
-Simon
+[Your Name]
