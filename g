@@ -1,21 +1,28 @@
 using HelixToolkit.Wpf.SharpDX;
 using SharpDX;
 
-// Call this after setting model.Geometry (or after you center it)
-public static void FixClippingAndZoom(HelixViewport3DX vp, PointGeometry3D geo)
+public static class GeoBounds
 {
-    if (vp?.Camera is not ProjectionCamera cam || geo?.Positions == null || geo.Positions.Count == 0)
-        return;
+    public static BoundingBox ComputeBoundingBox(Vector3Collection positions)
+    {
+        if (positions == null || positions.Count == 0)
+            return new BoundingBox(new Vector3(0, 0, 0), new Vector3(0, 0, 0));
 
-    // Compute bounds
-    var b = geo.Positions.BoundingBox;
-    var center = (b.Minimum + b.Maximum) * 0.5f;
-    var diag = (b.Maximum - b.Minimum).Length();
-    if (diag <= 1e-6f) diag = 1f;
+        var min = new Vector3(float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity);
+        var max = new Vector3(float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity);
 
-    // Set clip planes wide enough (key part)
-    cam.NearPlaneDistance = Math.Max(1e-3, diag * 0.001);  // small but > 0
-    cam.FarPlaneDistance  = diag * 100.0;                  // big
+        for (int i = 0; i < positions.Count; i++)
+        {
+            var p = positions[i];
+            min.X = Math.Min(min.X, p.X);
+            min.Y = Math.Min(min.Y, p.Y);
+            min.Z = Math.Min(min.Z, p.Z);
 
-    vp.ZoomExtents();
+            max.X = Math.Max(max.X, p.X);
+            max.Y = Math.Max(max.Y, p.Y);
+            max.Z = Math.Max(max.Z, p.Z);
+        }
+
+        return new BoundingBox(min, max);
+    }
 }
