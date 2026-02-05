@@ -1,67 +1,70 @@
 using System;
 using System.Linq;
+using System.Windows.Media.Media3D;
 using HelixToolkit.Wpf.SharpDX;
 using SharpDX;
 
-// Colors points by height (Z) to create a heatmap, and writes Colors back into the point model.
-// Assumes your point cloud is rendered by a PointGeometryModel3D inside the Viewport3DX.
-// If you have multiple point models, it will use the first one it finds (you can easily change that).
-public static void ApplyZHeatmapToPointCloud(Viewport3DX viewport, bool invert = false)
+public static class PointCloudSharpDxHelpers
 {
-    if (viewport == null) throw new ArgumentNullException(nameof(viewport));
-
-    // Find the first PointGeometryModel3D in the viewport
-    var pointModel = viewport.Items
-        .OfType<PointGeometryModel3D>()
-        .FirstOrDefault();
-
-    if (pointModel == null)
-        throw new InvalidOperationException("No PointGeometryModel3D found in Viewport3DX.Items.");
-
-    if (pointModel.Geometry is not PointGeometry3D geo)
-        throw new InvalidOperationException("PointGeometryModel3D.Geometry is not a PointGeometry3D.");
-
-    var positions = geo.Positions;
-    if (positions == null || positions.Count == 0)
-        throw new InvalidOperationException("PointGeometry3D.Positions is empty.");
-
-    // Compute Z range
-    float zMin = float.PositiveInfinity;
-    float zMax = float.NegativeInfinity;
-
-    for (int i = 0; i < positions.Count; i++)
+    /// <summary>
+    /// Builds a PointGeometry3D from a WPF Point3DCollection and assigns a Z-heatmap color per point.
+    /// Returns the geometry (Positions + Colors) ready to be assigned to a PointGeometryModel3D.Geometry.
+    ///
+    /// Colors is a Color4Collection (as required by HelixToolkit.Wpf.SharpDX).
+    /// </summary>
+    public static PointGeometry3D BuildHeatmapGeometryFromPoints(
+        Point3DCollection points,
+        bool invert = false,
+        float uniformAlpha = 1f)
     {
-        float z = positions[i].Z;
-        if (z < zMin) zMin = z;
-        if (z > zMax) zMax = z;
+        if (points == null) throw new ArgumentNullException(nameof(points));
+        if (points.Count == 0) return new PointGeometry3D();
+
+        if (uniformAlpha < 0f) uniformAlpha = 0f;
+        if (uniformAlpha > 1f) uniformAlpha = 1f;
+
+        // Build positions (Vector3Collection)
+        var positions = new Vector3Collection(points.Count);
+
+        // Compute Z range in one pass
+        double zMin = double.PositiveInfinity;
+        double zMax = double.NegativeInfinity;
+
+        for (int i = 0; i < points.Count; i++)
+        {
+            var p = points[i];
+            positions.Add(new Vector3((float)p.X, (float)p.Y, (float)p.Z));
+
+            if (p.Z < zMin) zMin = p.Z;
+            if (p.Z > zMax) zMax = p.Z;
+        }
+
+        double range = zMax - zMin;
+        if (range <= 1e-12) range = 1.0;
+
+        // Build colors (Color4Collection)
+        var colors = new Color4Collection(points.Count);
+
+        for (int i = 0; i < points.Count; i++)
+        {
+            double t = (points[i].Z - zMin) / range; // 0..1
+            if (invert) t = 1.0 - t;
+
+            var c = HeatColor((float)t, uniformAlpha);
+            colors.Add(c);
+        }
+
+        return new PointGeometry3D
+        {
+            Positions = positions,
+            Colors = colors
+        };
     }
 
-    float range = zMax - zMin;
-    if (range <= 1e-12f) range = 1f; // avoid div-by-zero if all points share same Z
-
-    // Allocate color array
-    // HelixToolkit.SharpDX uses SharpDX.Color4 (RGBA floats 0..1)
-    var colors = new Color4[positions.Count];
-
-    // Simple heatmap: blue -> cyan -> green -> yellow -> red
-    // You can swap this for a better colormap later (Turbo/Viridis/etc).
-    for (int i = 0; i < positions.Count; i++)
-    {
-        float t = (positions[i].Z - zMin) / range; // 0..1
-        if (invert) t = 1f - t;
-
-        colors[i] = HeatColor(t);
-    }
-
-    // Write colors back to geometry
-    // (Helix will re-upload to GPU when geometry changes)
-    geo.Colors = colors;
-
-    // Re-assigning ensures binding/refresh if you swap Geometry objects elsewhere
-    pointModel.Geometry = geo;
-
-    // Local helper: piecewise gradient
-    static Color4 HeatColor(float t)
+    /// <summary>
+    /// Simple heatmap colormap: blue -> cyan -> green -> yellow -> red.
+    /// </summary>
+    private static Color4 HeatColor(float t, float a)
     {
         t = MathUtil.Clamp(t, 0f, 1f);
 
@@ -69,24 +72,22 @@ public static void ApplyZHeatmapToPointCloud(Viewport3DX viewport, bool invert =
         if (t < 0.25f)
         {
             float u = t / 0.25f;
-            return new Color4(0f, u, 1f, 1f);
+            return new Color4(0f, u, 1f, a);
         }
         // 0.25-0.50: cyan -> green
         if (t < 0.50f)
         {
             float u = (t - 0.25f) / 0.25f;
-            return new Color4(0f, 1f, 1f - u, 1f);
+            return new Color4(0f, 1f, 1f - u, a);
         }
         // 0.50-0.75: green -> yellow
         if (t < 0.75f)
         {
             float u = (t - 0.50f) / 0.25f;
-            return new Color4(u, 1f, 0f, 1f);
+            return new Color4(u, 1f, 0f, a);
         }
         // 0.75-1.00: yellow -> red
-        {
-            float u = (t - 0.75f) / 0.25f;
-            return new Color4(1f, 1f - u, 0f, 1f);
-        }
+        float v = (t - 0.75f) / 0.25f;
+        return new Color4(1f, 1f - v, 0f, a);
     }
 }
