@@ -1,54 +1,46 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Windows;
-using HelixToolkit.Wpf.SharpDX;
-using SharpDX;
+using System.Windows;                 // System.Windows.Point
+using HelixToolkit.Wpf.SharpDX;      // Viewport3DX
+using SharpDX;                       // SharpDX.Vector3, SharpDX.Matrix
 
 public static class Viewport3DXPicking
 {
-    /// <summary>
-    /// Returns the nearest point in a point cloud to the clicked location in a Viewport3DX.
-    /// 1) If Helix hit-test hits something, returns the closest hit point.
-    /// 2) Otherwise casts a ray through the mouse pixel and returns the cloud point nearest that ray.
-    /// Always tries to return something if points has at least 1 point.
-    /// </summary>
     public static bool TryHitOrNearestPoint(
         Viewport3DX viewport,
-        Point mousePosition,
-        IList<Vector3> points,
-        out Vector3 nearestPoint)
+        System.Windows.Point mousePosition,
+        IList<SharpDX.Vector3> points,
+        out SharpDX.Vector3 nearestPoint)
     {
         nearestPoint = default;
 
         if (viewport == null) return false;
         if (points == null || points.Count == 0) return false;
 
-        // 1) Try Helix hit test first (if you clicked a renderable that supports hit testing)
-        //    In SharpDX Helix, this often works for meshes; point clouds depend on how they are rendered.
+        // 1) Try Helix hit test first
         var hits = viewport.FindHits(mousePosition);
         if (hits != null && hits.Count > 0)
         {
             var best = hits.OrderBy(h => h.Distance).FirstOrDefault();
             if (best != null)
             {
-                // PointHit is a SharpDX.Vector3 in SharpDX Helix hit results
-                nearestPoint = best.PointHit;
+                nearestPoint = best.PointHit; // SharpDX.Vector3
                 return true;
             }
         }
 
-        // 2) No hit: build a world-space ray from camera through mouse pixel, then find nearest point to the ray.
+        // 2) No hit: build a ray via UnProject at near/far
         if (!TryBuildPickRay(viewport, mousePosition, out var rayOrigin, out var rayDir))
         {
-            // Fallback: nearest to camera position (still "always returns something")
+            // fallback: nearest to camera
             var camPos = GetCameraPosition(viewport);
             float bestD2 = float.MaxValue;
-            Vector3 bestP = points[0];
+            var bestP = points[0];
 
             for (int i = 0; i < points.Count; i++)
             {
-                var d2 = Vector3.DistanceSquared(points[i], camPos);
+                float d2 = SharpDX.Vector3.DistanceSquared(points[i], camPos);
                 if (d2 < bestD2) { bestD2 = d2; bestP = points[i]; }
             }
 
@@ -56,28 +48,27 @@ public static class Viewport3DXPicking
             return true;
         }
 
-        // Normalize direction for safety
-        rayDir.Normalize();
+        rayDir = SharpDX.Vector3.Normalize(rayDir);
 
-        // Scan for nearest point to ray
+        // 3) Find nearest point to ray (O(N))
         bool found = false;
-        float bestRayDist2 = float.MaxValue;
-        Vector3 bestPoint = points[0];
+        float bestRayD2 = float.MaxValue;
+        var bestPoint = points[0];
 
         for (int i = 0; i < points.Count; i++)
         {
             var p = points[i];
             var w = p - rayOrigin;
 
-            float t = Vector3.Dot(w, rayDir); // since rayDir is normalized
-            if (t <= 0) continue; // behind camera
+            float t = SharpDX.Vector3.Dot(w, rayDir);  // rayDir normalized
+            if (t <= 0) continue;
 
             var proj = rayOrigin + rayDir * t;
-            float d2 = Vector3.DistanceSquared(p, proj);
+            float d2 = SharpDX.Vector3.DistanceSquared(p, proj);
 
-            if (d2 < bestRayDist2)
+            if (d2 < bestRayD2)
             {
-                bestRayDist2 = d2;
+                bestRayD2 = d2;
                 bestPoint = p;
                 found = true;
             }
@@ -85,11 +76,11 @@ public static class Viewport3DXPicking
 
         if (!found)
         {
-            // Fallback: nearest to ray origin (camera)
+            // fallback: nearest to origin
             float bestD2 = float.MaxValue;
             for (int i = 0; i < points.Count; i++)
             {
-                float d2 = Vector3.DistanceSquared(points[i], rayOrigin);
+                float d2 = SharpDX.Vector3.DistanceSquared(points[i], rayOrigin);
                 if (d2 < bestD2) { bestD2 = d2; bestPoint = points[i]; }
             }
         }
@@ -98,15 +89,11 @@ public static class Viewport3DXPicking
         return true;
     }
 
-    /// <summary>
-    /// Builds a pick ray in world space by unprojecting mouse position at near/far depths.
-    /// Uses camera view/projection matrices.
-    /// </summary>
     private static bool TryBuildPickRay(
         Viewport3DX viewport,
-        Point mouse,
-        out Vector3 origin,
-        out Vector3 direction)
+        System.Windows.Point mouse,
+        out SharpDX.Vector3 origin,
+        out SharpDX.Vector3 direction)
     {
         origin = default;
         direction = default;
@@ -115,42 +102,42 @@ public static class Viewport3DXPicking
         float h = (float)viewport.ActualHeight;
         if (w <= 1 || h <= 1) return false;
 
-        // NDC coords in [-1,1]
-        float ndcX = (float)(2.0 * mouse.X / w - 1.0);
-        float ndcY = (float)(1.0 - 2.0 * mouse.Y / h);
-
-        // Need view + projection
         var cam = viewport.Camera;
         if (cam == null) return false;
 
-        // HelixToolkit.Wpf.SharpDX cameras provide these matrix creators
-        var view = cam.CreateViewMatrix();
-        var proj = cam.CreateProjectionMatrix((float)(w / h));
+        // IMPORTANT: Helix SharpDX uses its own camera matrices via viewport
+        // These are available from viewport.RenderHost
+        var renderHost = viewport.RenderHost;
+        if (renderHost == null) return false;
+
+        var view = renderHost.RenderContext.ViewMatrix;
+        var proj = renderHost.RenderContext.ProjectionMatrix;
         var viewProj = view * proj;
 
-        Matrix invViewProj;
-        if (!Matrix.Invert(viewProj, out invViewProj))
+        SharpDX.Matrix invViewProj;
+        if (!SharpDX.Matrix.Invert(viewProj, out invViewProj))
             return false;
 
-        // Unproject near and far points (z=0 near, z=1 far in NDC)
-        var near4 = Vector3.TransformCoordinate(new Vector3(ndcX, ndcY, 0f), invViewProj);
-        var far4  = Vector3.TransformCoordinate(new Vector3(ndcX, ndcY, 1f), invViewProj);
+        // NDC in [-1,1]
+        float ndcX = (float)(2.0 * mouse.X / w - 1.0);
+        float ndcY = (float)(1.0 - 2.0 * mouse.Y / h);
 
-        origin = near4;
-        direction = far4 - near4;
+        // unproject z=0 (near), z=1 (far)
+        var near = SharpDX.Vector3.TransformCoordinate(new SharpDX.Vector3(ndcX, ndcY, 0f), invViewProj);
+        var far  = SharpDX.Vector3.TransformCoordinate(new SharpDX.Vector3(ndcX, ndcY, 1f), invViewProj);
 
-        if (direction.LengthSquared() < 1e-12f) return false;
-        direction.Normalize();
-        return true;
+        origin = near;
+        direction = far - near;
+
+        return direction.LengthSquared() > 1e-12f;
     }
 
-    private static Vector3 GetCameraPosition(Viewport3DX viewport)
+    private static SharpDX.Vector3 GetCameraPosition(Viewport3DX viewport)
     {
-        // Most Helix SharpDX cameras expose Position (PerspectiveCamera/OrthographicCamera).
-        // If not, we fallback to origin.
-        if (viewport.Camera is ProjectionCamera pc)
-            return new Vector3((float)pc.Position.X, (float)pc.Position.Y, (float)pc.Position.Z);
+        var cam = viewport.Camera;
+        if (cam == null) return SharpDX.Vector3.Zero;
 
-        return Vector3.Zero;
+        // HelixToolkit.Wpf.SharpDX cameras expose Position as SharpDX.Vector3
+        return cam.Position;
     }
 }
