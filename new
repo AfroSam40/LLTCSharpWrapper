@@ -1,32 +1,33 @@
-public static void InvertAroundCenterInPlace(IList<Vector3> pts, Axis axis)
+public static PointCloud JoinCloudsSideBySideX(IReadOnlyList<PointCloud> clouds, double gap = 0)
+{
+    var result = new PointCloud();
+    if (clouds == null || clouds.Count == 0) return result;
+
+    double resultMaxX = double.NegativeInfinity;
+
+    foreach (var cloud in clouds)
     {
-        if (pts == null) throw new ArgumentNullException(nameof(pts));
-        if (pts.Count == 0) return;
+        if (cloud?.Points == null || cloud.Points.Count == 0) continue;
 
-        // AABB center
-        var min = pts[0];
-        var max = pts[0];
+        // Bounds of incoming cloud (compute once)
+        double cloudMinX = cloud.Points.Min(p => p.X);
+        double cloudMaxX = cloud.Points.Max(p => p.X);
 
-        for (int i = 1; i < pts.Count; i++)
+        // If result already has points, shift incoming cloud so its MinX touches resultMaxX (+gap)
+        if (result.Points.Count != 0)
         {
-            var p = pts[i];
-            min = Vector3.Min(min, p);
-            max = Vector3.Max(max, p);
+            double dx = (resultMaxX - cloudMinX) + gap;
+            cloud.Offset(new(-dx, 0, 0)); // <-- if Offset takes +dx, use +dx; see note below
+
+            // After offset, cloudMaxX shifts by same dx
+            cloudMaxX += dx;
         }
 
-        float cx = (min.X + max.X) * 0.5f;
-        float cy = (min.Y + max.Y) * 0.5f;
-        float cz = (min.Z + max.Z) * 0.5f;
+        result.Join(cloud);
 
-        for (int i = 0; i < pts.Count; i++)
-        {
-            var p = pts[i];
-            pts[i] = axis switch
-            {
-                Axis.X => new Vector3(2f * cx - p.X, p.Y, p.Z),
-                Axis.Y => new Vector3(p.X, 2f * cy - p.Y, p.Z),
-                Axis.Z => new Vector3(p.X, p.Y, 2f * cz - p.Z),
-                _ => p
-            };
-        }
+        // Update resultMaxX incrementally (avoid rescanning result)
+        resultMaxX = double.IsNegativeInfinity(resultMaxX) ? cloudMaxX : Math.Max(resultMaxX, cloudMaxX);
     }
+
+    return result;
+}
