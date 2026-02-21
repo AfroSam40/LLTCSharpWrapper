@@ -1,21 +1,69 @@
-public void SetMarkerSphere(List<Vector3> pts, float radius = 1f)
+using System;
+using OpenCvSharp;
+
+public static (double Rx, double Ry, double Rz, double Tx, double Ty, double Tz,
+              double Sx, double Sy, double Sz, double ShXY, double ShXZ, double ShYZ,
+              string Debug)
+ExtractRxyzTxyzScaleShearDebug(Mat T, bool enforceRigid = true)
 {
-    var mb = new MeshBuilder(true, false); // <-- normals ON
+    if (T is null) throw new ArgumentNullException(nameof(T));
+    if (!((T.Rows == 3 && T.Cols == 4) || (T.Rows == 4 && T.Cols == 4))) throw new ArgumentException("T must be 3x4 or 4x4.", nameof(T));
+    using var Td = (T.Type() == MatType.CV_64F) ? T : T.Clone().ConvertTo(MatType.CV_64F);
 
-    foreach (var pt in pts)
-        mb.AddSphere(new Vector3(pt.X, pt.Y, pt.Z), radius, 16, 16);
+    double a00 = Td.At<double>(0,0), a01 = Td.At<double>(0,1), a02 = Td.At<double>(0,2), tx = Td.At<double>(0,3);
+    double a10 = Td.At<double>(1,0), a11 = Td.At<double>(1,1), a12 = Td.At<double>(1,2), ty = Td.At<double>(1,3);
+    double a20 = Td.At<double>(2,0), a21 = Td.At<double>(2,1), a22 = Td.At<double>(2,2), tz = Td.At<double>(2,3);
 
-    var geo = mb.ToMeshGeometry3D();
-    gMarkerModel.Geometry = geo;
+    double Dot(double x0,double y0,double z0,double x1,double y1,double z1)=> x0*x1+y0*y1+z0*z1;
+    double Norm(double x,double y,double z)=> Math.Sqrt(x*x+y*y+z*z);
 
-    // Guaranteed red
-    gMarkerModel.Material = new PhongMaterial
+    // scale/shear from columns of A
+    double c00=a00,c01=a10,c02=a20, c10=a01,c11=a11,c12=a21, c20=a02,c21=a12,c22=a22;
+    double sx = Norm(c00,c01,c02); if (sx < 1e-15) return (0,0,0,tx,ty,tz,0,0,0,0,0,0,"degenerate");
+    double u00=c00/sx, u01=c01/sx, u02=c02/sx;
+
+    double shXY_raw = Dot(u00,u01,u02, c10,c11,c12);
+    double c1x = c10 - u00*shXY_raw, c1y = c11 - u01*shXY_raw, c1z = c12 - u02*shXY_raw;
+    double sy = Norm(c1x,c1y,c1z); if (sy < 1e-15) return (0,0,0,tx,ty,tz,sx,0,0,0,0,0,"degenerate");
+    double u10=c1x/sy, u11=c1y/sy, u12=c1z/sy;
+    double shXY = shXY_raw / sy;
+
+    double shXZ_raw = Dot(u00,u01,u02, c20,c21,c22);
+    double c2x = c20 - u00*shXZ_raw, c2y = c21 - u01*shXZ_raw, c2z = c22 - u02*shXZ_raw;
+
+    double shYZ_raw = Dot(u10,u11,u12, c2x,c2y,c2z);
+    c2x -= u10*shYZ_raw; c2y -= u11*shYZ_raw; c2z -= u12*shYZ_raw;
+
+    double sz = Norm(c2x,c2y,c2z); if (sz < 1e-15) return (0,0,0,tx,ty,tz,sx,sy,0,shXY,0,0,"degenerate");
+    double shXZ = shXZ_raw / sz;
+    double shYZ = shYZ_raw / sz;
+
+    // rotation matrix used for Euler
+    double r00=a00,r01=a01,r02=a02, r10=a10,r11=a11,r12=a12, r20=a20,r21=a21,r22=a22;
+
+    if (enforceRigid)
     {
-        DiffuseColor = new Color4(1f, 0f, 0f, 1f),
-        AmbientColor = new Color4(0.2f, 0f, 0f, 1f), // helps avoid “too dark”
-        SpecularColor = new Color4(0.2f, 0.2f, 0.2f, 1f),
-        Shininess = 20f
-    };
+        using var A = new Mat(3,3,MatType.CV_64F);
+        A.Set(0,0,a00); A.Set(0,1,a01); A.Set(0,2,a02);
+        A.Set(1,0,a10); A.Set(1,1,a11); A.Set(1,2,a12);
+        A.Set(2,0,a20); A.Set(2,1,a21); A.Set(2,2,a22);
 
-    gMarkerModel.IsRendering = true;
+        using var R = NearestProperRotation(A); // <-- your existing method
+        r00=R.At<double>(0,0); r01=R.At<double>(0,1); r02=R.At<double>(0,2);
+        r10=R.At<double>(1,0); r11=R.At<double>(1,1); r12=R.At<double>(1,2);
+        r20=R.At<double>(2,0); r21=R.At<double>(2,1); r22=R.At<double>(2,2);
+    }
+
+    double Clamp(double v,double lo,double hi)=> v<lo?lo:(v>hi?hi:v);
+
+    // Euler ZYX (R = Rz*Ry*Rx), radians
+    double ry = Math.Asin(Clamp(-r20, -1.0, 1.0));
+    double cy = Math.Cos(ry);
+    double rx = Math.Abs(cy) > 1e-12 ? Math.Atan2(r21, r22) : 0.0;
+    double rz = Math.Abs(cy) > 1e-12 ? Math.Atan2(r10, r00) : Math.Atan2(-r01, r11);
+
+    string dbg = $"T: Tx={tx:F6}, Ty={ty:F6}, Tz={tz:F6} | R(zyx rad): Rx={rx:F6}, Ry={ry:F6}, Rz={rz:F6} | " +
+                 $"Scale: Sx={sx:F6}, Sy={sy:F6}, Sz={sz:F6} | Shear: ShXY={shXY:F6}, ShXZ={shXZ:F6}, ShYZ={shYZ:F6}";
+
+    return (rx, ry, rz, tx, ty, tz, sx, sy, sz, shXY, shXZ, shYZ, dbg);
 }
