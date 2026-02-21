@@ -1,26 +1,23 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Numerics;
-using HelixToolkit.Wpf.SharpDX;
-using SharpDX;
 
-public void SetMarkerSpheres(IEnumerable<(Vector3 pt, Color4 color)> markers, float radius = 1f, bool clearExisting = true)
+public static List<ScanPointXYZ> OrderCornersXY(IReadOnlyList<ScanPointXYZ> pts)
 {
-    if (markers == null) return;
-    var ms = markers as (Vector3 pt, Color4 color)[] ?? markers.ToArray();
-    if (ms.Length == 0) return;
-    if (clearExisting) MarkerGroup.Children.Clear();
+    if (pts == null || pts.Count != 4) throw new ArgumentException("Need exactly 4 points.");
+    var cx = pts.Average(p => p.X);
+    var cy = pts.Average(p => p.Y);
 
-    foreach (var g in ms.GroupBy(m => m.color))
-    {
-        var mb = new MeshBuilder(true, false);
-        g.ToList().ForEach(m => mb.AddSphere(new Vector3(m.pt.X, m.pt.Y, m.pt.Z), radius, 16, 16));
+    var ccw = pts.Select(p => (p, ang: Math.Atan2(p.Y - cy, p.X - cx)))
+                 .OrderBy(t => t.ang)
+                 .Select(t => t.p)
+                 .ToList();
 
-        MarkerGroup.Children.Add(new MeshGeometryModel3D
-        {
-            Geometry = mb.ToMeshGeometry3D(),
-            Material = new PhongMaterial { DiffuseColor = g.Key, EmissiveColor = g.Key }, // emissive = always visible
-            IsRendering = true
-        });
-    }
+    // pick a deterministic start: "top-left" in XY (min Y then min X)
+    // (If your Y axis increases downward like image coords, flip this to max Y)
+    int i0 = ccw.Select((p, i) => (p, i))
+                .OrderBy(t => t.p.Y).ThenBy(t => t.p.X)
+                .First().i;
+
+    return ccw.Skip(i0).Concat(ccw.Take(i0)).ToList();
 }
