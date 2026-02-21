@@ -1,8 +1,26 @@
-var colors = new List<Color4>
+using System.Collections.Generic;
+using System.Linq;
+using System.Numerics;
+using HelixToolkit.Wpf.SharpDX;
+using SharpDX;
+
+public void SetMarkerSpheres(IEnumerable<(Vector3 pt, Color4 color)> markers, float radius = 1f, bool clearExisting = true)
 {
-    new Color4(1f, 0f, 0f, 1f), // red
-    new Color4(0f, 1f, 0f, 1f), // green
-    new Color4(0f, 0f, 1f, 1f), // blue
-    new Color4(1f, 1f, 0f, 1f)  // yellow
-};
-```0
+    if (markers == null) return;
+    var ms = markers as (Vector3 pt, Color4 color)[] ?? markers.ToArray();
+    if (ms.Length == 0) return;
+    if (clearExisting) MarkerGroup.Children.Clear();
+
+    foreach (var g in ms.GroupBy(m => m.color))
+    {
+        var mb = new MeshBuilder(true, false);
+        g.ToList().ForEach(m => mb.AddSphere(new Vector3(m.pt.X, m.pt.Y, m.pt.Z), radius, 16, 16));
+
+        MarkerGroup.Children.Add(new MeshGeometryModel3D
+        {
+            Geometry = mb.ToMeshGeometry3D(),
+            Material = new PhongMaterial { DiffuseColor = g.Key, EmissiveColor = g.Key }, // emissive = always visible
+            IsRendering = true
+        });
+    }
+}
