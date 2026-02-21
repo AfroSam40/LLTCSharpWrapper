@@ -1,33 +1,43 @@
-public static PointCloud JoinCloudsSideBySideX(IReadOnlyList<PointCloud> clouds, double gap = 0)
+using System;
+using System.Collections.Generic;
+using System.Windows;
+using System.Windows.Media.Media3D;
+
+public static class ProjectionBackTo3D
 {
-    var result = new PointCloud();
-    if (clouds == null || clouds.Count == 0) return result;
-
-    double resultMaxX = double.NegativeInfinity;
-
-    foreach (var cloud in clouds)
+    /// <summary>
+    /// Maps 2D plane-coordinates (U,V) back into 3D points on the plane defined by PlaneFitResult.
+    /// Assumes your 2D points are in the same plane-basis coordinates you used during projection:
+    ///   U = (P - Centroid)·u,  V = (P - Centroid)·v
+    /// where u,v are orthonormal axes spanning the plane.
+    /// Returns 3D points: P = Centroid + U*u + V*v.
+    /// </summary>
+    public static Point3DCollection UVToWorld(PointCollection uvPoints, PlaneFitResult plane)
     {
-        if (cloud?.Points == null || cloud.Points.Count == 0) continue;
+        if (plane == null) throw new ArgumentNullException(nameof(plane));
+        var outPts = new Point3DCollection(uvPoints?.Count ?? 0);
+        if (uvPoints == null || uvPoints.Count == 0) return outPts;
 
-        // Bounds of incoming cloud (compute once)
-        double cloudMinX = cloud.Points.Min(p => p.X);
-        double cloudMaxX = cloud.Points.Max(p => p.X);
+        // Orthonormal basis from plane normal
+        var n = plane.Normal;
+        if (n.LengthSquared < 1e-18) throw new ArgumentException("Plane normal is invalid.", nameof(plane));
+        n.Normalize();
 
-        // If result already has points, shift incoming cloud so its MinX touches resultMaxX (+gap)
-        if (result.Points.Count != 0)
+        // pick a stable axis and build u,v in-plane
+        var axis = Math.Abs(n.Z) < 0.9 ? new Vector3D(0, 0, 1) : new Vector3D(0, 1, 0);
+        var u = Vector3D.CrossProduct(axis, n);
+        if (u.LengthSquared < 1e-18) u = Vector3D.CrossProduct(new Vector3D(1, 0, 0), n);
+        u.Normalize();
+        var v = Vector3D.CrossProduct(n, u);
+        v.Normalize();
+
+        var c = plane.Centroid;
+
+        for (int i = 0; i < uvPoints.Count; i++)
         {
-            double dx = (resultMaxX - cloudMinX) + gap;
-            cloud.Offset(new(-dx, 0, 0)); // <-- if Offset takes +dx, use +dx; see note below
-
-            // After offset, cloudMaxX shifts by same dx
-            cloudMaxX += dx;
+            var uv = uvPoints[i];
+            outPts.Add(c + uv.X * u + uv.Y * v);
         }
-
-        result.Join(cloud);
-
-        // Update resultMaxX incrementally (avoid rescanning result)
-        resultMaxX = double.IsNegativeInfinity(resultMaxX) ? cloudMaxX : Math.Max(resultMaxX, cloudMaxX);
+        return outPts;
     }
-
-    return result;
 }
