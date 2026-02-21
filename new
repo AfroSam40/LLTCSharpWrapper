@@ -1,48 +1,6 @@
-using System.Collections.Generic;
-using System.Linq;
-using System.Numerics;
-using HelixToolkit.SharpDX.Core;
-using HelixToolkit.SharpDX.Core.Utilities;
-using SharpDX;
-
-public void SetMarkerSphere(List<Vector3> pts, float radius = 1f, bool clearExisting = true)
+private static Mat ToMat(List<ScanPointXYZ> points)
 {
-    if (pts == null || pts.Count == 0) return;
-
-    var mb = new MeshBuilder(true, false);
-    pts.ForEach(p => mb.AddSphere(new Vector3(p.X, p.Y, p.Z), radius, 16, 16));
-    var addGeo = mb.ToMeshGeometry3D();
-
-    static MeshGeometry3D Combine(MeshGeometry3D a, MeshGeometry3D b)
-    {
-        if (a == null) return b;
-        if (b == null) return a;
-
-        var o = new MeshGeometry3D
-        {
-            Positions = new Vector3Collection(a.Positions.Count + b.Positions.Count),
-            Indices = new IntCollection(a.Indices.Count + b.Indices.Count)
-        };
-
-        o.Positions.AddRange(a.Positions);
-        o.Positions.AddRange(b.Positions);
-
-        o.Indices.AddRange(a.Indices);
-        int off = a.Positions.Count;
-        foreach (var i in b.Indices) o.Indices.Add(i + off);
-
-        return o;
-    }
-
-    gMarkerModel.Geometry = clearExisting || gMarkerModel.Geometry is not MeshGeometry3D cur ? addGeo : Combine(cur, addGeo);
-
-    gMarkerModel.Material ??= new PhongMaterial
-    {
-        DiffuseColor = new Color4(1f, 0f, 0f, 1f),
-        AmbientColor = new Color4(0.2f, 0f, 0f, 1f),
-        SpecularColor = new Color4(0.2f, 0.2f, 0.2f, 1f),
-        Shininess = 20f
-    };
-
-    gMarkerModel.IsRendering = true;
+    var m = new Mat(points.Count, 3, MatType.CV_64FC1);
+    for (int i = 0; i < points.Count; i++) { var p = points[i]; m.Set(i, 0, p.X); m.Set(i, 1, p.Y); m.Set(i, 2, p.Z); }
+    return m;
 }
