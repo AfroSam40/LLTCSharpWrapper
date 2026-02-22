@@ -1,13 +1,17 @@
-public static ScanPointXYZ Transform3DPointFast_EulerZYX(
+public static ScanPointXYZ Transform3DPointFast_FromGetTransform(
     in ScanPointXYZ p,
-    in (double rx, double ry, double rz, double tx, double ty, double tz) rt)
+    in (double Rx, double Ry, double Rz,
+        double Tx, double Ty, double Tz,
+        double Sx, double Sy, double Sz,
+        double ShXY, double ShXZ, double ShYZ,
+        string Debug) t)
 {
-    // angles in radians
-    double cx = Math.Cos(rt.rx), sx = Math.Sin(rt.rx);
-    double cy = Math.Cos(rt.ry), sy = Math.Sin(rt.ry);
-    double cz = Math.Cos(rt.rz), sz = Math.Sin(rt.rz);
+    // Assumes Rx,Ry,Rz are in radians and rotation order is Rz * Ry * Rx (ZYX)
+    double cx = Math.Cos(t.Rx), sx = Math.Sin(t.Rx);
+    double cy = Math.Cos(t.Ry), sy = Math.Sin(t.Ry);
+    double cz = Math.Cos(t.Rz), sz = Math.Sin(t.Rz);
 
-    // R = Rz * Ry * Rx (ZYX yaw-pitch-roll)
+    // R = Rz * Ry * Rx
     double r00 = cz * cy;
     double r01 = cz * sy * sx - sz * cx;
     double r02 = cz * sy * cx + sz * sx;
@@ -21,8 +25,8 @@ public static ScanPointXYZ Transform3DPointFast_EulerZYX(
     double r22 = cy * cx;
 
     return new ScanPointXYZ(
-        r00 * p.X + r01 * p.Y + r02 * p.Z + rt.tx,
-        r10 * p.X + r11 * p.Y + r12 * p.Z + rt.ty,
-        r20 * p.X + r21 * p.Y + r22 * p.Z + rt.tz
+        r00 * p.X + r01 * p.Y + r02 * p.Z + t.Tx,
+        r10 * p.X + r11 * p.Y + r12 * p.Z + t.Ty,
+        r20 * p.X + r21 * p.Y + r22 * p.Z + t.Tz
     );
 }
