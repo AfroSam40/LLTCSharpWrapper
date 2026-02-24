@@ -1,23 +1,116 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 
-public static List<ScanPointXYZ> OrderCornersXY(IReadOnlyList<ScanPointXYZ> pts)
+public static class CloudOverlap2D
 {
-    if (pts == null || pts.Count != 4) throw new ArgumentException("Need exactly 4 points.");
-    var cx = pts.Average(p => p.X);
-    var cy = pts.Average(p => p.Y);
+    // Returns the subsets of both clouds that lie in XY-cells where the two clouds "overlap in Z".
+    // "Overlap in Z" is decided per XY-cell by comparing mean-Z(A) vs mean-Z(B).
+    // The Z tolerance is auto-derived robustly from the distribution of per-cell |Δz| (MAD-based).
+    public static (Vector3[] aOverlap, Vector3[] bOverlap) ExtractZOverlapSectionXY(
+        IReadOnlyList<Vector3> cloudA,
+        IReadOnlyList<Vector3> cloudB)
+    {
+        if (cloudA is null || cloudB is null) throw new ArgumentNullException();
+        if (cloudA.Count == 0 || cloudB.Count == 0) return (Array.Empty<Vector3>(), Array.Empty<Vector3>());
 
-    var ccw = pts.Select(p => (p, ang: Math.Atan2(p.Y - cy, p.X - cx)))
-                 .OrderBy(t => t.ang)
-                 .Select(t => t.p)
-                 .ToList();
+        float aMinX = float.PositiveInfinity, aMaxX = float.NegativeInfinity, aMinY = float.PositiveInfinity, aMaxY = float.NegativeInfinity;
+        for (int i = 0; i < cloudA.Count; i++)
+        {
+            var p = cloudA[i];
+            if (p.X < aMinX) aMinX = p.X; if (p.X > aMaxX) aMaxX = p.X;
+            if (p.Y < aMinY) aMinY = p.Y; if (p.Y > aMaxY) aMaxY = p.Y;
+        }
 
-    // pick a deterministic start: "top-left" in XY (min Y then min X)
-    // (If your Y axis increases downward like image coords, flip this to max Y)
-    int i0 = ccw.Select((p, i) => (p, i))
-                .OrderBy(t => t.p.Y).ThenBy(t => t.p.X)
-                .First().i;
+        float bMinX = float.PositiveInfinity, bMaxX = float.NegativeInfinity, bMinY = float.PositiveInfinity, bMaxY = float.NegativeInfinity;
+        for (int i = 0; i < cloudB.Count; i++)
+        {
+            var p = cloudB[i];
+            if (p.X < bMinX) bMinX = p.X; if (p.X > bMaxX) bMaxX = p.X;
+            if (p.Y < bMinY) bMinY = p.Y; if (p.Y > bMaxY) bMaxY = p.Y;
+        }
 
-    return ccw.Skip(i0).Concat(ccw.Take(i0)).ToList();
+        float xMin = MathF.Max(aMinX, bMinX), xMax = MathF.Min(aMaxX, bMaxX);
+        float yMin = MathF.Max(aMinY, bMinY), yMax = MathF.Min(aMaxY, bMaxY);
+        if (!(xMax > xMin) || !(yMax > yMin)) return (Array.Empty<Vector3>(), Array.Empty<Vector3>());
+
+        int targetCells = 40000; // ~200x200
+        int nx = Math.Clamp((int)MathF.Sqrt(targetCells * (xMax - xMin) / (yMax - yMin)), 64, 512);
+        int ny = Math.Clamp(targetCells / nx, 64, 512);
+
+        float invDx = nx / (xMax - xMin);
+        float invDy = ny / (yMax - yMin);
+
+        int cells = nx * ny;
+        var sumA = new double[cells];
+        var cntA = new int[cells];
+        var sumB = new double[cells];
+        var cntB = new int[cells];
+
+        int Index(float x, float y)
+        {
+            int ix = (int)((x - xMin) * invDx);
+            int iy = (int)((y - yMin) * invDy);
+            if ((uint)ix >= (uint)nx || (uint)iy >= (uint)ny) return -1;
+            return iy * nx + ix;
+        }
+
+        for (int i = 0; i < cloudA.Count; i++)
+        {
+            var p = cloudA[i];
+            int id = Index(p.X, p.Y);
+            if (id < 0) continue;
+            sumA[id] += p.Z;
+            cntA[id]++;
+        }
+
+        for (int i = 0; i < cloudB.Count; i++)
+        {
+            var p = cloudB[i];
+            int id = Index(p.X, p.Y);
+            if (id < 0) continue;
+            sumB[id] += p.Z;
+            cntB[id]++;
+        }
+
+        int minPerCell = 10;
+
+        var dzAbs = new List<double>(cells / 8);
+        for (int id = 0; id < cells; id++)
+        {
+            if (cntA[id] < minPerCell || cntB[id] < minPerCell) continue;
+            double mA = sumA[id] / cntA[id];
+            double mB = sumB[id] / cntB[id];
+            dzAbs.Add(Math.Abs(mA - mB));
+        }
+
+        if (dzAbs.Count == 0) return (Array.Empty<Vector3>(), Array.Empty<Vector3>());
+
+        dzAbs.Sort();
+        double Median(List<double> v) => v[v.Count / 2];
+
+        double med = Median(dzAbs);
+        var absDev = dzAbs.Select(d => Math.Abs(d - med)).ToList();
+        absDev.Sort();
+        double mad = Median(absDev);
+
+        double sigma = 1.4826 * mad;                 // robust std estimate
+        double zTol = Math.Max(3.0 * sigma, med);    // tolerate typical mismatch but reject big gaps
+        if (zTol <= 0) zTol = 1e-6;
+
+        var good = new bool[cells];
+        for (int id = 0; id < cells; id++)
+        {
+            if (cntA[id] < minPerCell || cntB[id] < minPerCell) continue;
+            double mA = sumA[id] / cntA[id];
+            double mB = sumB[id] / cntB[id];
+            good[id] = Math.Abs(mA - mB) <= zTol;
+        }
+
+        Vector3[] aOverlap = cloudA.Where(p => { int id = Index(p.X, p.Y); return id >= 0 && good[id]; }).ToArray();
+        Vector3[] bOverlap = cloudB.Where(p => { int id = Index(p.X, p.Y); return id >= 0 && good[id]; }).ToArray();
+
+        return (aOverlap, bOverlap);
+    }
 }
