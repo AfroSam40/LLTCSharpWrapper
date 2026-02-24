@@ -1,63 +1,154 @@
 using System;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 
-public static class RtCompare
+public static class PitchRefine
 {
-    /// <summary>
-    /// Compares refined vs init.
-    /// Returns a printable string with:
-    ///  - Δ = refined ∘ inv(init)
-    ///  - Δ translation (and magnitude)
-    ///  - Δ rotation angle (deg)
-    /// Assumes Rt maps src->dst (same direction for both).
-    /// </summary>
-    public static string CompareRefinedWithInitString(in FastIcp3D.Rt init, in FastIcp3D.Rt refined, int decimals = 6)
+    public static ((double rx, double ry, double rz, double tx, double ty, double tz) refined, double bestMaxAbsDz)
+        RefineRyMinimizeMaxDzAcrossX(
+            ReadOnlySpan<Vector3> reference,
+            ReadOnlySpan<Vector3> reading,
+            (double rx, double ry, double rz, double tx, double ty, double tz) rt,
+            int bins = 200,
+            double searchHalfRangeRad = 0.01,   // ~0.57°
+            int coarseSteps = 41,
+            int refineIters = 20,
+            int strideRef = 4,
+            int strideRead = 4)
     {
-        // Build 4x4 matrices
-        static Matrix4x4 ToM(in FastIcp3D.Rt t) => new Matrix4x4(
-            (float)t.r00, (float)t.r01, (float)t.r02, 0f,
-            (float)t.r10, (float)t.r11, (float)t.r12, 0f,
-            (float)t.r20, (float)t.r21, (float)t.r22, 0f,
-            (float)t.tx,  (float)t.ty,  (float)t.tz,  1f);
+        if (reference.Length < 10 || reading.Length < 10) return (rt, double.PositiveInfinity);
+        bins = Math.Max(10, bins);
 
-        static string F(float v, int d) => v.ToString("F" + d);
-        static string D(double v, int d) => v.ToString("F" + d);
-
-        static double AngleDeg(Quaternion q)
+        // Find X range (reference frame) for binning
+        float xMin = float.PositiveInfinity, xMax = float.NegativeInfinity;
+        for (int i = 0; i < reference.Length; i += Math.Max(1, strideRef))
         {
-            q = Quaternion.Normalize(q);
-            double w = Math.Clamp(q.W, -1.0f, 1.0f);
-            return (2.0 * Math.Acos(w)) * 180.0 / Math.PI;
+            float x = reference[i].X;
+            if (x < xMin) xMin = x;
+            if (x > xMax) xMax = x;
+        }
+        if (!(xMax > xMin)) return (rt, double.PositiveInfinity);
+
+        float invBin = (float)(bins / (double)(xMax - xMin));
+
+        // Precompute reference mean Z per X-bin
+        var refSum = new double[bins];
+        var refCnt = new int[bins];
+        for (int i = 0; i < reference.Length; i += Math.Max(1, strideRef))
+        {
+            var p = reference[i];
+            int b = (int)((p.X - xMin) * invBin);
+            if ((uint)b >= (uint)bins) continue;
+            refSum[b] += p.Z;
+            refCnt[b]++;
         }
 
-        var Mi = ToM(in init);
-        var Mr = ToM(in refined);
+        var readSum = new double[bins];
+        var readCnt = new int[bins];
 
-        if (!Matrix4x4.Invert(Mi, out var MiInv))
-            return "Init matrix not invertible.";
+        // Precompute sin/cos terms that do not change while refining ry
+        double cx = Math.Cos(rt.rx), sx = Math.Sin(rt.rx);
+        double cz = Math.Cos(rt.rz), sz = Math.Sin(rt.rz);
 
-        // Δ = refined * inv(init)
-        var Md = Mr * MiInv;
-
-        var deltaT = new Vector3(Md.M41, Md.M42, Md.M43);
-        double deltaTmag = deltaT.Length();
-
-        var qd = Quaternion.CreateFromRotationMatrix(Md);
-        double deltaAng = AngleDeg(qd);
-
-        string RtStr(string name, in FastIcp3D.Rt t) =>
-            $"{name}: t=({D(t.tx,decimals)},{D(t.ty,decimals)},{D(t.tz,decimals)})  " +
-            $"R=[{D(t.r00,decimals)} {D(t.r01,decimals)} {D(t.r02,decimals)}; " +
-            $"{D(t.r10,decimals)} {D(t.r11,decimals)} {D(t.r12,decimals)}; " +
-            $"{D(t.r20,decimals)} {D(t.r21,decimals)} {D(t.r22,decimals)}]";
-
-        return string.Join(Environment.NewLine, new[]
+        // Evaluate objective for a candidate ry: max |Δz| across X-bins where both clouds have support
+        double Eval(double ryCand)
         {
-            RtStr("Init   ", in init),
-            RtStr("Refined", in refined),
-            $"Δt = ({F(deltaT.X,decimals)},{F(deltaT.Y,decimals)},{F(deltaT.Z,decimals)}), |Δt|={D(deltaTmag,decimals)}",
-            $"ΔR angle = {D(deltaAng,decimals)} deg"
-        });
+            double cy = Math.Cos(ryCand), sy = Math.Sin(ryCand);
+
+            // R = Rz * Ry * Rx (ZYX yaw-pitch-roll)
+            double r00 = cz * cy;
+            double r01 = cz * sy * sx - sz * cx;
+            double r02 = cz * sy * cx + sz * sx;
+
+            double r10 = sz * cy;
+            double r11 = sz * sy * sx + cz * cx;
+            double r12 = sz * sy * cx - cz * sx;
+
+            double r20 = -sy;
+            double r21 = cy * sx;
+            double r22 = cy * cx;
+
+            Array.Clear(readSum, 0, bins);
+            Array.Clear(readCnt, 0, bins);
+
+            // Transform reading points, then bin by X' (in reference frame), accumulate Z'
+            for (int i = 0; i < reading.Length; i += Math.Max(1, strideRead))
+            {
+                var p = reading[i];
+                double x = p.X, y = p.Y, z = p.Z;
+
+                double xp = r00 * x + r01 * y + r02 * z + rt.tx;
+                double zp = r20 * x + r21 * y + r22 * z + rt.tz;
+
+                int b = (int)(((float)xp - xMin) * invBin);
+                if ((uint)b >= (uint)bins) continue;
+
+                readSum[b] += zp;
+                readCnt[b]++;
+            }
+
+            double maxAbs = 0.0;
+            int used = 0;
+
+            for (int b = 0; b < bins; b++)
+            {
+                if (refCnt[b] < 3 || readCnt[b] < 3) continue;
+
+                double dz = (readSum[b] / readCnt[b]) - (refSum[b] / refCnt[b]);
+                double a = Math.Abs(dz);
+                if (a > maxAbs) maxAbs = a;
+                used++;
+            }
+
+            return used < 5 ? double.PositiveInfinity : maxAbs;
+        }
+
+        // Coarse grid search around current ry
+        double lo = rt.ry - searchHalfRangeRad;
+        double hi = rt.ry + searchHalfRangeRad;
+
+        double bestRy = rt.ry;
+        double best = double.PositiveInfinity;
+
+        if (coarseSteps < 3) coarseSteps = 3;
+        for (int i = 0; i < coarseSteps; i++)
+        {
+            double ryCand = lo + (hi - lo) * i / (coarseSteps - 1);
+            double val = Eval(ryCand);
+            if (val < best) { best = val; bestRy = ryCand; }
+        }
+
+        // Narrow bracket around best grid point, then do golden-section refine
+        double step = (hi - lo) / (coarseSteps - 1);
+        lo = bestRy - step;
+        hi = bestRy + step;
+
+        const double gr = 0.6180339887498949;
+        double a0 = lo, b0 = hi;
+        double c = b0 - (b0 - a0) * gr;
+        double d = a0 + (b0 - a0) * gr;
+        double fc = Eval(c);
+        double fd = Eval(d);
+
+        for (int it = 0; it < Math.Max(1, refineIters); it++)
+        {
+            if (fc < fd)
+            {
+                b0 = d; d = c; fd = fc;
+                c = b0 - (b0 - a0) * gr;
+                fc = Eval(c);
+            }
+            else
+            {
+                a0 = c; c = d; fc = fd;
+                d = a0 + (b0 - a0) * gr;
+                fd = Eval(d);
+            }
+        }
+
+        double ryFinal = (fc < fd) ? c : d;
+        double scoreFinal = Math.Min(fc, fd);
+
+        return ((rt.rx, ryFinal, rt.rz, rt.tx, rt.ty, rt.tz), scoreFinal);
     }
 }
-```0
