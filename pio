@@ -1,117 +1,94 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
-using System.IO;
-using System.Linq;
-using System.Windows.Media.Media3D;
+using System.Numerics;
+using MathNet.Numerics.LinearAlgebra;
 
-public static class PointCloudIO
+public static class SimilarityFit3D
 {
-    private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;
-
     /// <summary>
-    /// Save a point cloud as simple text .xyz file: "x y z" per line.
-    /// Optional header lines start with '#'.
+    /// Umeyama/Kabsch best-fit mapping src -> dst:
+    ///   dst ≈ s * R * src + t
+    /// Returns a 4x4 matrix M (homogeneous) with the scale baked into the 3x3 block (s*R),
+    /// plus the uniform scale s as a separate value.
+    ///
+    /// withScale=false => Kabsch (s=1)
+    /// withScale=true  => Umeyama (uniform s)
     /// </summary>
-    public static void SaveAsXyz(
-        string filePath,
-        Point3DCollection points,
-        IEnumerable<string>? headerLines = null)
+    public static (Matrix4x4 M, double s) KabschUmeyamaMatrix(
+        IReadOnlyList<Vector3> src,
+        IReadOnlyList<Vector3> dst,
+        bool withScale = false)
     {
-        if (points == null)
-            throw new ArgumentNullException(nameof(points));
+        if (src is null || dst is null) throw new ArgumentNullException();
+        if (src.Count != dst.Count) throw new ArgumentException("src/dst must have same length.");
+        if (src.Count < 3) throw new ArgumentException("Need at least 3 point pairs.");
 
-        using var writer = new StreamWriter(filePath);
+        int n = src.Count;
 
-        // Optional metadata header
-        if (headerLines != null)
+        // Centroids
+        Vector3 cs = default, cd = default;
+        for (int i = 0; i < n; i++) { cs += src[i]; cd += dst[i]; }
+        cs /= n; cd /= n;
+
+        // Covariance H and source variance
+        var H = Matrix<double>.Build.Dense(3, 3);
+        double varSrc = 0.0;
+
+        for (int i = 0; i < n; i++)
         {
-            foreach (var line in headerLines)
-                writer.WriteLine("# " + line);
+            var a = src[i] - cs;
+            var b = dst[i] - cd;
+
+            H[0, 0] += a.X * b.X; H[0, 1] += a.X * b.Y; H[0, 2] += a.X * b.Z;
+            H[1, 0] += a.Y * b.X; H[1, 1] += a.Y * b.Y; H[1, 2] += a.Y * b.Z;
+            H[2, 0] += a.Z * b.X; H[2, 1] += a.Z * b.Y; H[2, 2] += a.Z * b.Z;
+
+            varSrc += a.X * a.X + a.Y * a.Y + a.Z * a.Z;
         }
 
-        foreach (var p in points)
+        // SVD: H = U * S * V^T
+        var svd = H.Svd(true);
+        var U = svd.U;
+        var Vt = svd.VT;
+        var V = Vt.Transpose();
+
+        // R = V * U^T
+        var R = V * U.Transpose();
+
+        // Enforce det(R)=+1 (no reflection)
+        if (R.Determinant() < 0)
         {
-            writer.WriteLine(
-                string.Format(Invariant, "{0} {1} {2}", p.X, p.Y, p.Z));
-        }
-    }
-
-    /// <summary>
-    /// Load a point cloud from a .xyz-like text file: "x y z" per line.
-    /// Lines starting with '#' are ignored.
-    /// </summary>
-    public static Point3DCollection LoadFromXyz(string filePath)
-    {
-        var result = new Point3DCollection();
-
-        foreach (var line in File.ReadLines(filePath))
-        {
-            var trimmed = line.Trim();
-
-            // Skip comments / empty lines
-            if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith("#"))
-                continue;
-
-            var parts = trimmed.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 3)
-                continue; // or throw if you want strict parsing
-
-            if (double.TryParse(parts[0], NumberStyles.Float, Invariant, out double x) &&
-                double.TryParse(parts[1], NumberStyles.Float, Invariant, out double y) &&
-                double.TryParse(parts[2], NumberStyles.Float, Invariant, out double z))
-            {
-                result.Add(new Point3D(x, y, z));
-            }
-            else
-            {
-                // Optionally log or throw here
-            }
+            V[0, 2] *= -1; V[1, 2] *= -1; V[2, 2] *= -1;
+            R = V * U.Transpose();
         }
 
-        return result;
-    }
-
-    /// <summary>
-    /// Save a point cloud in a compact binary format:
-    /// [int32 count][double x][double y][double z]...
-    /// </summary>
-    public static void SaveAsBinary(string filePath, Point3DCollection points)
-    {
-        if (points == null)
-            throw new ArgumentNullException(nameof(points));
-
-        using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
-        using var bw = new BinaryWriter(fs);
-
-        bw.Write(points.Count);
-        foreach (var p in points)
+        double s = 1.0;
+        if (withScale)
         {
-            bw.Write(p.X);
-            bw.Write(p.Y);
-            bw.Write(p.Z);
-        }
-    }
-
-    /// <summary>
-    /// Load a point cloud from the binary format defined in SaveAsBinary.
-    /// </summary>
-    public static Point3DCollection LoadFromBinary(string filePath)
-    {
-        using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        using var br = new BinaryReader(fs);
-
-        int count = br.ReadInt32();
-        var result = new Point3DCollection(count);
-
-        for (int i = 0; i < count; i++)
-        {
-            double x = br.ReadDouble();
-            double y = br.ReadDouble();
-            double z = br.ReadDouble();
-            result.Add(new Point3D(x, y, z));
+            // Umeyama uniform scale
+            double traceS = svd.S.Sum();
+            s = traceS / varSrc;
         }
 
-        return result;
+        // t = cd - s*R*cs
+        var csV = Vector<double>.Build.Dense(new[] { (double)cs.X, (double)cs.Y, (double)cs.Z });
+        var cdV = Vector<double>.Build.Dense(new[] { (double)cd.X, (double)cd.Y, (double)cd.Z });
+        var tV = cdV - (s * (R * csV));
+
+        // Pack into Matrix4x4 (row-major), with scale baked into 3x3 as s*R
+        float m11 = (float)(s * R[0, 0]), m12 = (float)(s * R[0, 1]), m13 = (float)(s * R[0, 2]);
+        float m21 = (float)(s * R[1, 0]), m22 = (float)(s * R[1, 1]), m23 = (float)(s * R[1, 2]);
+        float m31 = (float)(s * R[2, 0]), m32 = (float)(s * R[2, 1]), m33 = (float)(s * R[2, 2]);
+
+        float tx = (float)tV[0], ty = (float)tV[1], tz = (float)tV[2];
+
+        var M = new Matrix4x4(
+            m11, m12, m13, 0f,
+            m21, m22, m23, 0f,
+            m31, m32, m33, 0f,
+            tx,  ty,  tz,  1f
+        );
+
+        return (M, s);
     }
 }
