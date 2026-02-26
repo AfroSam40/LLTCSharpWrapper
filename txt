@@ -1,260 +1,57 @@
-public List<Profile> AcquireProfilesEncoderTriggered(
-    int profileCount,
-    int timeoutPerProfileMs = 2000,
-    bool gatedEncoder = false)
-{
-    if (!_connected)
-        throw new InvalidOperationException("Sensor not connected. Call Connect() first.");
-
-    if (profileCount <= 0)
-        throw new ArgumentOutOfRangeException(nameof(profileCount), "Profile count must be > 0.");
-
-    int ret;
-    uint lostProfiles = 0;
-    uint resolution = (uint)_resolution;
-
-    // 1) Configure the multi-IO port for encoder on IN2 / IN3
-    //
-    // This makes the digital inputs behave as an encoder A/B pair.
-    // Adjust flags if your wiring/voltage is different.
-    uint digitalIoConfig =
-        CLLTI.MULTI_LEVEL_24V |           // 24 V input level
-        CLLTI.MULTI_RS422_TERM_ON |       // RS422 termination on
-        CLLTI.MULTI_ENCODER_BIDIRECT |    // quadrature encoder
-        CLLTI.MULTI_INPUT_PULLUP |        // pull-up
-        (gatedEncoder
-            ? CLLTI.MULTI_DIGIN_GATED_ENCODER  // encoder gated by digital input
-            : CLLTI.MULTI_DIGIN_ENC_TRIG);     // encoder trigger mode
-
-    ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_DIGITAL_IO, digitalIoConfig);
-    if (ret < CLLTI.GENERAL_FUNCTION_OK)
-    {
-        SetError("SetFeature(DIGITAL_IO)", ret);
-        throw new Exception(ErrorMessage ?? "Failed to configure digital IO for encoder.");
-    }
-
-    // 2) Configure trigger: encoder on digital inputs as external trigger
-    uint triggerConfig =
-        CLLTI.TRIG_MODE_ENCODER |
-        CLLTI.TRIG_INPUT_DIGIN |
-        CLLTI.TRIG_POLARITY_HIGH |
-        CLLTI.TRIG_EXT_ACTIVE;    // use external trigger, not internal
-
-    ret = CLLTI.SetFeature(device, CLLTI.FEATURE_FUNCTION_TRIGGER, triggerConfig);
-    if (ret < CLLTI.GENERAL_FUNCTION_OK)
-    {
-        SetError("SetFeature(TRIGGER)", ret);
-        throw new Exception(ErrorMessage ?? "Failed to configure encoder trigger.");
-    }
-
-    // 3) Allocate buffers
-    var profiles = new List<Profile>(profileCount);
-
-    double[] xValues = new double[resolution];
-    double[] zValues = new double[resolution];
-    byte[] profileBuffer = new byte[resolution * 64];
-
-    // 4) Start continuous profile transfer (encoder decides when profiles appear)
-    ret = CLLTI.TransferProfiles(device, TTransferProfileType.NORMAL_TRANSFER, 1);
-    if (ret < CLLTI.GENERAL_FUNCTION_OK)
-    {
-        SetError("TransferProfiles(start, encoder)", ret);
-        throw new Exception(ErrorMessage ?? "Failed to start profile transfer.");
-    }
-
-    try
-    {
-        var overallWatch = System.Diagnostics.Stopwatch.StartNew();
-
-        for (int n = 0; n < profileCount; n++)
-        {
-            var perProfileWatch = System.Diagnostics.Stopwatch.StartNew();
-
-            while (true)
-            {
-                ret = CLLTI.GetActualProfile(
-                    device,
-                    profileBuffer,
-                    profileBuffer.Length,
-                    TProfileConfig.PROFILE,
-                    ref lostProfiles);
-
-                if (ret == CLLTI.ERROR_PROFTRANS_NO_NEW_PROFILE)
-                {
-                    // No profile yet – encoder hasn’t moved enough.
-                    // Back off a bit and check timeout.
-                    if (perProfileWatch.ElapsedMilliseconds > timeoutPerProfileMs)
-                    {
-                        SetError("GetActualProfile(timeout)", ret);
-                        throw new TimeoutException(
-                            $"Timeout waiting for encoder-triggered profile {n + 1}/{profileCount}.");
-                    }
-
-                    // Sleep roughly according to frame time, but small enough not to be too laggy
-                    System.Threading.Thread.Sleep((int)(_exposureTime + _idleTime) / 200 + 1);
-                    continue;
-                }
-
-                if (ret != profileBuffer.Length)
-                {
-                    SetError("GetActualProfile(size)", ret);
-                    throw new Exception(ErrorMessage ?? $"Unexpected profile size: {ret}.");
-                }
-
-                // Got one profile
-                break;
-            }
-
-            // 5) Convert this profile to X/Z arrays
-            ret = CLLTI.ConvertProfile2Values(
-                device,
-                profileBuffer,
-                resolution,
-                TProfileConfig.PROFILE,
-                _scannerType,
-                0,   // reflection index
-                1,   // convert to mm
-                null, null, null,
-                xValues,
-                zValues,
-                null, null);
-
-            if (((ret & CLLTI.CONVERT_X) == 0) || ((ret & CLLTI.CONVERT_Z) == 0))
-            {
-                SetError("ConvertProfile2Values", ret);
-                throw new Exception(ErrorMessage ?? "Conversion of profile data failed.");
-            }
-
-            // 6) Build Profile object (X vs Z)
-            var profile = new Profile(new List<ScanPoint>((int)resolution));
-            for (int i = 0; i < resolution; i++)
-            {
-                profile.Add(new ScanPoint
-                {
-                    X = xValues[i],
-                    Z = zValues[i]
-                });
-            }
-
-            profiles.Add(profile);
-        }
-
-        ErrorMessage = null;
-        return profiles;
-    }
-    finally
-    {
-        // 7) Always stop streaming regardless of errors
-        int stopRet = CLLTI.TransferProfiles(device, TTransferProfileType.NORMAL_TRANSFER, 0);
-        if (stopRet < CLLTI.GENERAL_FUNCTION_OK)
-        {
-            SetError("TransferProfiles(stop, encoder)", stopRet);
-        }
-    }
-}
-
-------
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Windows.Media.Media3D;
+using System.Numerics;
 
-namespace LLT
+public static class WorkObjectXform
 {
-    public class HeightSurface
+    // Corners must be ordered TL, TR, BR, BL (single scan).
+    // Returns a 3x3 rotation matrix where columns are the work axes expressed in world coordinates:
+    //   col0 = Xwork_in_world, col1 = Ywork_in_world, col2 = Zwork_in_world (normal).
+    public static Matrix4x4 RotationMatrixFromFiducial4Corners(ReadOnlySpan<Vector3> cornersTLTRBRBL)
     {
-        /// <summary>
-        /// Mean Z-height of this surface (in same units as your points, e.g. mm).
-        /// </summary>
-        public double MeanHeight { get; set; }
+        if (cornersTLTRBRBL.Length != 4) throw new ArgumentException("Expected 4 corners: TL,TR,BR,BL.");
 
-        /// <summary>
-        /// Points belonging to this surface.
-        /// </summary>
-        public List<Point3D> Points { get; } = new List<Point3D>();
+        var c = cornersTLTRBRBL;
+
+        var top    = c[1] - c[0]; // TR - TL
+        var bottom = c[2] - c[3]; // BR - BL
+        var left   = c[3] - c[0]; // BL - TL
+        var right  = c[2] - c[1]; // BR - TR
+
+        var x = Vector3.Normalize(top + bottom);
+        var y0 = Vector3.Normalize(left + right);
+
+        var z = Vector3.Normalize(Vector3.Cross(x, y0));
+        var y = Vector3.Normalize(Vector3.Cross(z, x));
+
+        return new Matrix4x4(
+            x.X, y.X, z.X, 0f,
+            x.Y, y.Y, z.Y, 0f,
+            x.Z, y.Z, z.Z, 0f,
+            0f,  0f,  0f,  1f
+        );
     }
-}
 
-------
-
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Windows.Media.Media3D;
-
-namespace LLT
-{
-    public static class PointCloudProcessing
+    // Converts a work-coordinate point into world coordinates.
+    // - cornersTLTRBRBL: fiducial corners (TL,TR,BR,BL) in world coordinates
+    // - workPt: (u,v,w) in work coordinates (typically w=0 for points on the fiducial plane)
+    // - linearOffset: extra offset along work axes (du,dv,dw) applied before transforming (e.g., tool offset)
+    public static Vector3 WorkPointToWorld(
+        ReadOnlySpan<Vector3> cornersTLTRBRBL,
+        in Vector3 workPt,
+        in Vector3 linearOffset)
     {
-        /// <summary>
-        /// Cluster a multi-surface point cloud into horizontal surfaces based on Z height.
-        /// 
-        /// Assumptions:
-        ///  - Each “surface” is approximately flat (small Z variation within a surface).
-        ///  - Different surfaces are separated in Z by more than 'heightTolerance'.
-        ///
-        /// Returns surfaces sorted by MeanHeight ascending (lowest surface first).
-        /// </summary>
-        /// <param name="points">Input point cloud.</param>
-        /// <param name="heightTolerance">
-        /// Max allowed deviation in Z from the current surface's running mean for a point
-        /// to still belong to that surface (same units as Z, e.g. mm).
-        /// </param>
-        public static List<HeightSurface> ClusterSurfacesByHeight(
-            Point3DCollection points,
-            double heightTolerance)
-        {
-            if (points == null)
-                throw new ArgumentNullException(nameof(points));
+        if (cornersTLTRBRBL.Length != 4) throw new ArgumentException("Expected 4 corners: TL,TR,BR,BL.");
 
-            var result = new List<HeightSurface>();
-            if (points.Count == 0)
-                return result;
+        var origin = (cornersTLTRBRBL[0] + cornersTLTRBRBL[1] + cornersTLTRBRBL[2] + cornersTLTRBRBL[3]) * 0.25f;
+        var R = RotationMatrixFromFiducial4Corners(cornersTLTRBRBL);
 
-            // Copy & sort by Z (height)
-            var sorted = points.OrderBy(p => p.Z).ToList();
+        var p = workPt + linearOffset;
 
-            // Start first surface
-            var currentSurface = new HeightSurface();
-            currentSurface.Points.Add(sorted[0]);
-            double meanZ = sorted[0].Z;
-            int count = 1;
-
-            for (int i = 1; i < sorted.Count; i++)
-            {
-                var p = sorted[i];
-
-                // Difference from current surface mean height
-                double dz = Math.Abs(p.Z - meanZ);
-
-                if (dz <= heightTolerance)
-                {
-                    // Same surface
-                    currentSurface.Points.Add(p);
-                    count++;
-                    // Update running mean (simple incremental update)
-                    meanZ = meanZ + (p.Z - meanZ) / count;
-                }
-                else
-                {
-                    // Finish old surface
-                    currentSurface.MeanHeight = meanZ;
-                    result.Add(currentSurface);
-
-                    // Start new surface
-                    currentSurface = new HeightSurface();
-                    currentSurface.Points.Add(p);
-                    meanZ = p.Z;
-                    count = 1;
-                }
-            }
-
-            // Add last surface
-            currentSurface.MeanHeight = meanZ;
-            result.Add(currentSurface);
-
-            // Ensure sorted by height (just in case)
-            return result.OrderBy(s => s.MeanHeight).ToList();
-        }
+        // world = origin + R * p  (R stored with axes in columns)
+        return new Vector3(
+            origin.X + R.M11 * p.X + R.M12 * p.Y + R.M13 * p.Z,
+            origin.Y + R.M21 * p.X + R.M22 * p.Y + R.M23 * p.Z,
+            origin.Z + R.M31 * p.X + R.M32 * p.Y + R.M33 * p.Z
+        );
     }
 }
