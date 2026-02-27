@@ -1,35 +1,36 @@
 using System;
-using System.Linq;
 using System.Numerics;
 
-public static Vector3[] OrderCornersTLTRBRBL(ReadOnlySpan<Vector3> corners)
+public static Transform WorkToWorldFromFiducial(ReadOnlySpan<Vector3> cornersTLTRBRBL, int originIndex)
 {
-    if (corners.Length != 4) throw new ArgumentException("Need 4 corners.");
-    var pts = corners.ToArray();
-    var c = (pts[0] + pts[1] + pts[2] + pts[3]) * 0.25f;
+    if (cornersTLTRBRBL.Length != 4) throw new ArgumentException("Expected 4 corners TL,TR,BR,BL.");
+    if ((uint)originIndex > 3) throw new ArgumentOutOfRangeException(nameof(originIndex));
 
-    var n = Vector3.Cross(pts[1] - pts[0], pts[3] - pts[0]);
-    n = n.LengthSquared() > 1e-12f ? Vector3.Normalize(n) : Vector3.UnitZ;
+    var c = cornersTLTRBRBL;
+    var origin = c[originIndex];
 
-    var u = pts.Select(p => { var d = p - c; d -= n * Vector3.Dot(d, n); return d; })
-               .OrderByDescending(d => d.LengthSquared()).First();
-    u = u.LengthSquared() > 1e-12f ? Vector3.Normalize(u) : Vector3.UnitX;
-    var v = Vector3.Normalize(Vector3.Cross(n, u));
+    var top    = c[1] - c[0];
+    var bottom = c[2] - c[3];
+    var left   = c[3] - c[0];
+    var right  = c[2] - c[1];
 
-    var p2 = pts.Select(p => { var d = p - c; var x = Vector3.Dot(d, u); var y = Vector3.Dot(d, v); return (p, x, y, s: x + y, d2: x - y); }).ToArray();
+    var x = Vector3.Normalize(top + bottom);
+    var y0 = Vector3.Normalize(left + right);
 
-    var tl = p2.OrderBy(t => t.d2).First().p;
-    var tr = p2.OrderByDescending(t => t.s).First().p;
-    var br = p2.OrderByDescending(t => t.d2).First().p;
-    var bl = p2.OrderBy(t => t.s).First().p;
+    var z = Vector3.Normalize(Vector3.Cross(x, y0));
+    var y = Vector3.Normalize(Vector3.Cross(z, x));
 
-    // If degenerate/tied and duplicates occur, fall back to CCW angle ordering then pick TL as highest Y then lowest X.
-    if (new[] { tl, tr, br, bl }.Distinct().Count() != 4)
-    {
-        var ccw = p2.OrderBy(t => MathF.Atan2(t.y, t.x)).ToArray();
-        var tlIdx = ccw.Select((t, i) => (t, i)).OrderByDescending(t => t.t.y).ThenBy(t => t.t.x).First().i;
-        return new[] { ccw[tlIdx].p, ccw[(tlIdx + 1) & 3].p, ccw[(tlIdx + 2) & 3].p, ccw[(tlIdx + 3) & 3].p };
-    }
+    // Optional: enforce your convention here by flipping x/y if needed
+    // x = -x;  // if you want +X to point left instead of right
+    // y = -y;  // if you want +Y to point up instead of down
 
-    return new[] { tl, tr, br, bl };
+    // Work -> World matrix (axes in columns, translation is originWorld)
+    var M = new Matrix4x4(
+        x.X, y.X, z.X, 0f,
+        x.Y, y.Y, z.Y, 0f,
+        x.Z, y.Z, z.Z, 0f,
+        origin.X, origin.Y, origin.Z, 1f
+    );
+
+    return new Transform { transformMatrix = M };
 }
