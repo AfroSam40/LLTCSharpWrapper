@@ -3,100 +3,110 @@ using System.Collections.Generic;
 using HelixToolkit.SharpDX;
 using HelixToolkit.Wpf.SharpDX;
 using SharpDX;
-
-// Input assumption: your BlobSlice has:
-//   Point3D[] HullWorld;        // WPF Point3D array (world coords, on the slice plane)
-//   System.Windows.Media.Media3D.Vector3D Normal;  // WPF normal
-//   double Z0, Z1;              // slice bounds along normal (same units as world)
-//   System.Windows.Media.Media3D.Point3D CenterWorld;
+using D3DCull = SharpDX.Direct3D11.CullMode;
 
 public static class SliceMeshDx
 {
-    public static MeshGeometryModel3D BuildHullSliceMeshSharpDx(
-        BlobSlice slice,
+    // Assumes BlobSlice has:
+    //   System.Windows.Media.Media3D.Point3D[] HullWorld
+    //   System.Windows.Media.Media3D.Vector3D Normal
+    //   double Z0, Z1
+    //   System.Windows.Media.Media3D.Point3D CenterWorld
+
+    public static MeshGeometryModel3D BuildHullSlicesMeshSharpDx(
+        IEnumerable<BlobSlice> slices,
         Color4 color,
         float opacity = 0.3f,
         float thicknessScale = 1.0f,
         bool twoSided = true)
     {
-        var hull = slice?.HullWorld;
-        if (hull == null || hull.Length < 3) return null;
+        if (slices == null) return null;
 
-        // Normal (convert WPF Vector3D -> SharpDX Vector3)
-        var n = new Vector3((float)slice.Normal.X, (float)slice.Normal.Y, (float)slice.Normal.Z);
-        if (n.LengthSquared() < 1e-12f) return null;
-        n = Vector3.Normalize(n);
-
-        float thickness = (float)((slice.Z1 - slice.Z0) * thicknessScale);
-        if (thickness <= 0) return null;
-
-        var centerMid = new Vector3((float)slice.CenterWorld.X, (float)slice.CenterWorld.Y, (float)slice.CenterWorld.Z);
-        var offset = n * (0.5f * thickness);
-
-        var centerBottom = centerMid - offset;
-        var centerTop = centerMid + offset;
-
-        int nHull = hull.Length;
-
-        // Vertex layout:
-        // 0               = bottom center
-        // 1..nHull        = bottom ring
-        // nHull+1         = top center
-        // nHull+2..end    = top ring
-        var positions = new Vector3Collection(2 * nHull + 2);
+        var positions = new Vector3Collection();
         var indices = new IntCollection();
 
-        positions.Add(centerBottom);
-        for (int i = 0; i < nHull; i++)
+        foreach (var slice in slices)
         {
-            var p = hull[i];
-            positions.Add(new Vector3((float)p.X, (float)p.Y, (float)p.Z) - offset);
+            var hull = slice?.HullWorld;
+            if (hull == null || hull.Length < 3) continue;
+
+            var n = new Vector3((float)slice.Normal.X, (float)slice.Normal.Y, (float)slice.Normal.Z);
+            if (n.LengthSquared() < 1e-12f) continue;
+            n = Vector3.Normalize(n);
+
+            float thickness = (float)((slice.Z1 - slice.Z0) * thicknessScale);
+            if (thickness <= 0) continue;
+
+            var centerMid = new Vector3((float)slice.CenterWorld.X, (float)slice.CenterWorld.Y, (float)slice.CenterWorld.Z);
+            var offset = n * (0.5f * thickness);
+            var centerBottom = centerMid - offset;
+            var centerTop = centerMid + offset;
+
+            int nHull = hull.Length;
+
+            // Base index for this slice in the global buffers
+            int baseIndex = positions.Count;
+
+            // Vertex layout for this slice:
+            // baseIndex + 0               = bottom center
+            // baseIndex + 1..nHull        = bottom ring
+            // baseIndex + nHull + 1       = top center
+            // baseIndex + nHull + 2..end  = top ring
+
+            positions.Add(centerBottom);
+            for (int i = 0; i < nHull; i++)
+            {
+                var p = hull[i];
+                positions.Add(new Vector3((float)p.X, (float)p.Y, (float)p.Z) - offset);
+            }
+
+            int bottomCenter = baseIndex + 0;
+            int bottomStart = baseIndex + 1;
+
+            // Bottom cap (fan)
+            for (int i = 0; i < nHull; i++)
+            {
+                int i2 = bottomStart + i;
+                int i3 = bottomStart + ((i + 1) % nHull);
+                indices.Add(bottomCenter);
+                indices.Add(i2);
+                indices.Add(i3);
+            }
+
+            int topCenter = bottomStart + nHull;
+            positions.Add(centerTop);
+
+            int topStart = topCenter + 1;
+            for (int i = 0; i < nHull; i++)
+            {
+                var p = hull[i];
+                positions.Add(new Vector3((float)p.X, (float)p.Y, (float)p.Z) + offset);
+            }
+
+            // Top cap (fan) - flip winding
+            for (int i = 0; i < nHull; i++)
+            {
+                int i2 = topStart + i;
+                int i3 = topStart + ((i + 1) % nHull);
+                indices.Add(topCenter);
+                indices.Add(i3);
+                indices.Add(i2);
+            }
+
+            // Side quads
+            for (int i = 0; i < nHull; i++)
+            {
+                int b0 = bottomStart + i;
+                int b1 = bottomStart + ((i + 1) % nHull);
+                int t0 = topStart + i;
+                int t1 = topStart + ((i + 1) % nHull);
+
+                indices.Add(b0); indices.Add(b1); indices.Add(t1);
+                indices.Add(b0); indices.Add(t1); indices.Add(t0);
+            }
         }
 
-        int bottomCenter = 0;
-        int bottomStart = 1;
-
-        // Bottom cap (fan)
-        for (int i = 0; i < nHull; i++)
-        {
-            int i2 = bottomStart + i;
-            int i3 = bottomStart + ((i + 1) % nHull);
-            indices.Add(bottomCenter);
-            indices.Add(i2);
-            indices.Add(i3);
-        }
-
-        int topCenter = positions.Count;
-        positions.Add(centerTop);
-
-        int topStart = positions.Count;
-        for (int i = 0; i < nHull; i++)
-        {
-            var p = hull[i];
-            positions.Add(new Vector3((float)p.X, (float)p.Y, (float)p.Z) + offset);
-        }
-
-        // Top cap (fan) - flip winding
-        for (int i = 0; i < nHull; i++)
-        {
-            int i2 = topStart + i;
-            int i3 = topStart + ((i + 1) % nHull);
-            indices.Add(topCenter);
-            indices.Add(i3);
-            indices.Add(i2);
-        }
-
-        // Side quads (two triangles per edge)
-        for (int i = 0; i < nHull; i++)
-        {
-            int b0 = bottomStart + i;
-            int b1 = bottomStart + ((i + 1) % nHull);
-            int t0 = topStart + i;
-            int t1 = topStart + ((i + 1) % nHull);
-
-            indices.Add(b0); indices.Add(b1); indices.Add(t1);
-            indices.Add(b0); indices.Add(t1); indices.Add(t0);
-        }
+        if (positions.Count < 3 || indices.Count < 3) return null;
 
         var mesh = new MeshGeometry3D
         {
@@ -104,8 +114,8 @@ public static class SliceMeshDx
             Indices = indices
         };
 
-        // Optional: let Helix compute normals; otherwise set flat normals yourself.
-        // mesh.Normals = MeshGeometry3D.CalculateNormals(positions, indices);
+        // Optional: compute normals if you need lighting to look correct
+        // mesh.Normals = MeshGeometry3D.CalculateNormals(mesh.Positions, mesh.Indices);
 
         var mat = new PhongMaterial
         {
@@ -117,26 +127,8 @@ public static class SliceMeshDx
         {
             Geometry = mesh,
             Material = mat,
-            CullMode = twoSided ? SharpDX.Direct3D11.CullMode.None : SharpDX.Direct3D11.CullMode.Back,
+            CullMode = twoSided ? D3DCull.None : D3DCull.Back,
             IsHitTestVisible = false
         };
-    }
-
-    public static List<MeshGeometryModel3D> BuildHullSliceMeshesSharpDx(
-        IEnumerable<BlobSlice> slices,
-        Color4 color,
-        float opacity = 0.3f,
-        float thicknessScale = 1.0f,
-        bool twoSided = true)
-    {
-        var list = new List<MeshGeometryModel3D>();
-        if (slices == null) return list;
-
-        foreach (var s in slices)
-        {
-            var m = BuildHullSliceMeshSharpDx(s, color, opacity, thicknessScale, twoSided);
-            if (m != null) list.Add(m);
-        }
-        return list;
     }
 }
