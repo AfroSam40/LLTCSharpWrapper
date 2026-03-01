@@ -1,116 +1,142 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Numerics;
+using HelixToolkit.SharpDX;
+using HelixToolkit.Wpf.SharpDX;
+using SharpDX;
 
-public static class CloudOverlap2D
+// Input assumption: your BlobSlice has:
+//   Point3D[] HullWorld;        // WPF Point3D array (world coords, on the slice plane)
+//   System.Windows.Media.Media3D.Vector3D Normal;  // WPF normal
+//   double Z0, Z1;              // slice bounds along normal (same units as world)
+//   System.Windows.Media.Media3D.Point3D CenterWorld;
+
+public static class SliceMeshDx
 {
-    // Returns the subsets of both clouds that lie in XY-cells where the two clouds "overlap in Z".
-    // "Overlap in Z" is decided per XY-cell by comparing mean-Z(A) vs mean-Z(B).
-    // The Z tolerance is auto-derived robustly from the distribution of per-cell |Δz| (MAD-based).
-    public static (Vector3[] aOverlap, Vector3[] bOverlap) ExtractZOverlapSectionXY(
-        IReadOnlyList<Vector3> cloudA,
-        IReadOnlyList<Vector3> cloudB)
+    public static MeshGeometryModel3D BuildHullSliceMeshSharpDx(
+        BlobSlice slice,
+        Color4 color,
+        float opacity = 0.3f,
+        float thicknessScale = 1.0f,
+        bool twoSided = true)
     {
-        if (cloudA is null || cloudB is null) throw new ArgumentNullException();
-        if (cloudA.Count == 0 || cloudB.Count == 0) return (Array.Empty<Vector3>(), Array.Empty<Vector3>());
+        var hull = slice?.HullWorld;
+        if (hull == null || hull.Length < 3) return null;
 
-        float aMinX = float.PositiveInfinity, aMaxX = float.NegativeInfinity, aMinY = float.PositiveInfinity, aMaxY = float.NegativeInfinity;
-        for (int i = 0; i < cloudA.Count; i++)
+        // Normal (convert WPF Vector3D -> SharpDX Vector3)
+        var n = new Vector3((float)slice.Normal.X, (float)slice.Normal.Y, (float)slice.Normal.Z);
+        if (n.LengthSquared() < 1e-12f) return null;
+        n = Vector3.Normalize(n);
+
+        float thickness = (float)((slice.Z1 - slice.Z0) * thicknessScale);
+        if (thickness <= 0) return null;
+
+        var centerMid = new Vector3((float)slice.CenterWorld.X, (float)slice.CenterWorld.Y, (float)slice.CenterWorld.Z);
+        var offset = n * (0.5f * thickness);
+
+        var centerBottom = centerMid - offset;
+        var centerTop = centerMid + offset;
+
+        int nHull = hull.Length;
+
+        // Vertex layout:
+        // 0               = bottom center
+        // 1..nHull        = bottom ring
+        // nHull+1         = top center
+        // nHull+2..end    = top ring
+        var positions = new Vector3Collection(2 * nHull + 2);
+        var indices = new IntCollection();
+
+        positions.Add(centerBottom);
+        for (int i = 0; i < nHull; i++)
         {
-            var p = cloudA[i];
-            if (p.X < aMinX) aMinX = p.X; if (p.X > aMaxX) aMaxX = p.X;
-            if (p.Y < aMinY) aMinY = p.Y; if (p.Y > aMaxY) aMaxY = p.Y;
+            var p = hull[i];
+            positions.Add(new Vector3((float)p.X, (float)p.Y, (float)p.Z) - offset);
         }
 
-        float bMinX = float.PositiveInfinity, bMaxX = float.NegativeInfinity, bMinY = float.PositiveInfinity, bMaxY = float.NegativeInfinity;
-        for (int i = 0; i < cloudB.Count; i++)
+        int bottomCenter = 0;
+        int bottomStart = 1;
+
+        // Bottom cap (fan)
+        for (int i = 0; i < nHull; i++)
         {
-            var p = cloudB[i];
-            if (p.X < bMinX) bMinX = p.X; if (p.X > bMaxX) bMaxX = p.X;
-            if (p.Y < bMinY) bMinY = p.Y; if (p.Y > bMaxY) bMaxY = p.Y;
+            int i2 = bottomStart + i;
+            int i3 = bottomStart + ((i + 1) % nHull);
+            indices.Add(bottomCenter);
+            indices.Add(i2);
+            indices.Add(i3);
         }
 
-        float xMin = MathF.Max(aMinX, bMinX), xMax = MathF.Min(aMaxX, bMaxX);
-        float yMin = MathF.Max(aMinY, bMinY), yMax = MathF.Min(aMaxY, bMaxY);
-        if (!(xMax > xMin) || !(yMax > yMin)) return (Array.Empty<Vector3>(), Array.Empty<Vector3>());
+        int topCenter = positions.Count;
+        positions.Add(centerTop);
 
-        int targetCells = 40000; // ~200x200
-        int nx = Math.Clamp((int)MathF.Sqrt(targetCells * (xMax - xMin) / (yMax - yMin)), 64, 512);
-        int ny = Math.Clamp(targetCells / nx, 64, 512);
-
-        float invDx = nx / (xMax - xMin);
-        float invDy = ny / (yMax - yMin);
-
-        int cells = nx * ny;
-        var sumA = new double[cells];
-        var cntA = new int[cells];
-        var sumB = new double[cells];
-        var cntB = new int[cells];
-
-        int Index(float x, float y)
+        int topStart = positions.Count;
+        for (int i = 0; i < nHull; i++)
         {
-            int ix = (int)((x - xMin) * invDx);
-            int iy = (int)((y - yMin) * invDy);
-            if ((uint)ix >= (uint)nx || (uint)iy >= (uint)ny) return -1;
-            return iy * nx + ix;
+            var p = hull[i];
+            positions.Add(new Vector3((float)p.X, (float)p.Y, (float)p.Z) + offset);
         }
 
-        for (int i = 0; i < cloudA.Count; i++)
+        // Top cap (fan) - flip winding
+        for (int i = 0; i < nHull; i++)
         {
-            var p = cloudA[i];
-            int id = Index(p.X, p.Y);
-            if (id < 0) continue;
-            sumA[id] += p.Z;
-            cntA[id]++;
+            int i2 = topStart + i;
+            int i3 = topStart + ((i + 1) % nHull);
+            indices.Add(topCenter);
+            indices.Add(i3);
+            indices.Add(i2);
         }
 
-        for (int i = 0; i < cloudB.Count; i++)
+        // Side quads (two triangles per edge)
+        for (int i = 0; i < nHull; i++)
         {
-            var p = cloudB[i];
-            int id = Index(p.X, p.Y);
-            if (id < 0) continue;
-            sumB[id] += p.Z;
-            cntB[id]++;
+            int b0 = bottomStart + i;
+            int b1 = bottomStart + ((i + 1) % nHull);
+            int t0 = topStart + i;
+            int t1 = topStart + ((i + 1) % nHull);
+
+            indices.Add(b0); indices.Add(b1); indices.Add(t1);
+            indices.Add(b0); indices.Add(t1); indices.Add(t0);
         }
 
-        int minPerCell = 10;
-
-        var dzAbs = new List<double>(cells / 8);
-        for (int id = 0; id < cells; id++)
+        var mesh = new MeshGeometry3D
         {
-            if (cntA[id] < minPerCell || cntB[id] < minPerCell) continue;
-            double mA = sumA[id] / cntA[id];
-            double mB = sumB[id] / cntB[id];
-            dzAbs.Add(Math.Abs(mA - mB));
-        }
+            Positions = positions,
+            Indices = indices
+        };
 
-        if (dzAbs.Count == 0) return (Array.Empty<Vector3>(), Array.Empty<Vector3>());
+        // Optional: let Helix compute normals; otherwise set flat normals yourself.
+        // mesh.Normals = MeshGeometry3D.CalculateNormals(positions, indices);
 
-        dzAbs.Sort();
-        double Median(List<double> v) => v[v.Count / 2];
-
-        double med = Median(dzAbs);
-        var absDev = dzAbs.Select(d => Math.Abs(d - med)).ToList();
-        absDev.Sort();
-        double mad = Median(absDev);
-
-        double sigma = 1.4826 * mad;                 // robust std estimate
-        double zTol = Math.Max(3.0 * sigma, med);    // tolerate typical mismatch but reject big gaps
-        if (zTol <= 0) zTol = 1e-6;
-
-        var good = new bool[cells];
-        for (int id = 0; id < cells; id++)
+        var mat = new PhongMaterial
         {
-            if (cntA[id] < minPerCell || cntB[id] < minPerCell) continue;
-            double mA = sumA[id] / cntA[id];
-            double mB = sumB[id] / cntB[id];
-            good[id] = Math.Abs(mA - mB) <= zTol;
+            DiffuseColor = new Color4(color.Red, color.Green, color.Blue, opacity),
+            AmbientColor = new Color4(color.Red, color.Green, color.Blue, opacity) * 0.25f
+        };
+
+        return new MeshGeometryModel3D
+        {
+            Geometry = mesh,
+            Material = mat,
+            CullMode = twoSided ? SharpDX.Direct3D11.CullMode.None : SharpDX.Direct3D11.CullMode.Back,
+            IsHitTestVisible = false
+        };
+    }
+
+    public static List<MeshGeometryModel3D> BuildHullSliceMeshesSharpDx(
+        IEnumerable<BlobSlice> slices,
+        Color4 color,
+        float opacity = 0.3f,
+        float thicknessScale = 1.0f,
+        bool twoSided = true)
+    {
+        var list = new List<MeshGeometryModel3D>();
+        if (slices == null) return list;
+
+        foreach (var s in slices)
+        {
+            var m = BuildHullSliceMeshSharpDx(s, color, opacity, thicknessScale, twoSided);
+            if (m != null) list.Add(m);
         }
-
-        Vector3[] aOverlap = cloudA.Where(p => { int id = Index(p.X, p.Y); return id >= 0 && good[id]; }).ToArray();
-        Vector3[] bOverlap = cloudB.Where(p => { int id = Index(p.X, p.Y); return id >= 0 && good[id]; }).ToArray();
-
-        return (aOverlap, bOverlap);
+        return list;
     }
 }
