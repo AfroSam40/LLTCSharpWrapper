@@ -1,134 +1,86 @@
 using System;
-using System.Collections.Generic;
-using HelixToolkit.SharpDX;
-using HelixToolkit.Wpf.SharpDX;
-using SharpDX;
-using D3DCull = SharpDX.Direct3D11.CullMode;
+using ILGPU;
+using ILGPU.Runtime;
 
-public static class SliceMeshDx
+// Your point type (must be blittable for best performance).
+public struct ScanPointXYZ
 {
-    // Assumes BlobSlice has:
-    //   System.Windows.Media.Media3D.Point3D[] HullWorld
-    //   System.Windows.Media.Media3D.Vector3D Normal
-    //   double Z0, Z1
-    //   System.Windows.Media.Media3D.Point3D CenterWorld
+    public float X, Y, Z;
+    public ScanPointXYZ(float x, float y, float z) { X = x; Y = y; Z = z; }
+}
 
-    public static MeshGeometryModel3D BuildHullSlicesMeshSharpDx(
-        IEnumerable<BlobSlice> slices,
-        Color4 color,
-        float opacity = 0.3f,
-        float thicknessScale = 1.0f,
-        bool twoSided = true)
+// Uniform-scale + 3x3 + translation (blittable)
+public struct RigidTf
+{
+    public float r00, r01, r02;
+    public float r10, r11, r12;
+    public float r20, r21, r22;
+    public float tx, ty, tz;
+    public float s;
+}
+
+public static class GpuRigidTransform
+{
+    // Cache these so you DON'T recreate them every call.
+    private static readonly Context _ctx = Context.CreateDefault();
+    private static readonly Accelerator _acc = _ctx.CreateDefaultAccelerator();
+    private static readonly Action<Index1D, ArrayView<ScanPointXYZ>, ArrayView<ScanPointXYZ>, RigidTf> _kernel
+        = _acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<ScanPointXYZ>, ArrayView<ScanPointXYZ>, RigidTf>(Kernel);
+
+    // GPU kernel
+    private static void Kernel(
+        Index1D i,
+        ArrayView<ScanPointXYZ> src,
+        ArrayView<ScanPointXYZ> dst,
+        RigidTf rt)
     {
-        if (slices == null) return null;
+        if (i >= src.Length) return;
 
-        var positions = new Vector3Collection();
-        var indices = new IntCollection();
+        var p = src[i];
+        float x = p.X, y = p.Y, z = p.Z;
+        float s = rt.s;
 
-        foreach (var slice in slices)
+        dst[i] = new ScanPointXYZ(
+            s * (rt.r00 * x + rt.r01 * y + rt.r02 * z) + rt.tx,
+            s * (rt.r10 * x + rt.r11 * y + rt.r12 * z) + rt.ty,
+            s * (rt.r20 * x + rt.r21 * y + rt.r22 * z) + rt.tz
+        );
+    }
+
+    // Convert your Transform -> RigidTf
+    // Replace this with YOUR transform extraction (Matrix3D, your tuple, etc).
+    public static RigidTf ToRigidTf(
+        double r00, double r01, double r02,
+        double r10, double r11, double r12,
+        double r20, double r21, double r22,
+        double tx, double ty, double tz,
+        double s)
+    {
+        return new RigidTf
         {
-            var hull = slice?.HullWorld;
-            if (hull == null || hull.Length < 3) continue;
-
-            var n = new Vector3((float)slice.Normal.X, (float)slice.Normal.Y, (float)slice.Normal.Z);
-            if (n.LengthSquared() < 1e-12f) continue;
-            n = Vector3.Normalize(n);
-
-            float thickness = (float)((slice.Z1 - slice.Z0) * thicknessScale);
-            if (thickness <= 0) continue;
-
-            var centerMid = new Vector3((float)slice.CenterWorld.X, (float)slice.CenterWorld.Y, (float)slice.CenterWorld.Z);
-            var offset = n * (0.5f * thickness);
-            var centerBottom = centerMid - offset;
-            var centerTop = centerMid + offset;
-
-            int nHull = hull.Length;
-
-            // Base index for this slice in the global buffers
-            int baseIndex = positions.Count;
-
-            // Vertex layout for this slice:
-            // baseIndex + 0               = bottom center
-            // baseIndex + 1..nHull        = bottom ring
-            // baseIndex + nHull + 1       = top center
-            // baseIndex + nHull + 2..end  = top ring
-
-            positions.Add(centerBottom);
-            for (int i = 0; i < nHull; i++)
-            {
-                var p = hull[i];
-                positions.Add(new Vector3((float)p.X, (float)p.Y, (float)p.Z) - offset);
-            }
-
-            int bottomCenter = baseIndex + 0;
-            int bottomStart = baseIndex + 1;
-
-            // Bottom cap (fan)
-            for (int i = 0; i < nHull; i++)
-            {
-                int i2 = bottomStart + i;
-                int i3 = bottomStart + ((i + 1) % nHull);
-                indices.Add(bottomCenter);
-                indices.Add(i2);
-                indices.Add(i3);
-            }
-
-            int topCenter = bottomStart + nHull;
-            positions.Add(centerTop);
-
-            int topStart = topCenter + 1;
-            for (int i = 0; i < nHull; i++)
-            {
-                var p = hull[i];
-                positions.Add(new Vector3((float)p.X, (float)p.Y, (float)p.Z) + offset);
-            }
-
-            // Top cap (fan) - flip winding
-            for (int i = 0; i < nHull; i++)
-            {
-                int i2 = topStart + i;
-                int i3 = topStart + ((i + 1) % nHull);
-                indices.Add(topCenter);
-                indices.Add(i3);
-                indices.Add(i2);
-            }
-
-            // Side quads
-            for (int i = 0; i < nHull; i++)
-            {
-                int b0 = bottomStart + i;
-                int b1 = bottomStart + ((i + 1) % nHull);
-                int t0 = topStart + i;
-                int t1 = topStart + ((i + 1) % nHull);
-
-                indices.Add(b0); indices.Add(b1); indices.Add(t1);
-                indices.Add(b0); indices.Add(t1); indices.Add(t0);
-            }
-        }
-
-        if (positions.Count < 3 || indices.Count < 3) return null;
-
-        var mesh = new MeshGeometry3D
-        {
-            Positions = positions,
-            Indices = indices
+            r00 = (float)r00, r01 = (float)r01, r02 = (float)r02,
+            r10 = (float)r10, r11 = (float)r11, r12 = (float)r12,
+            r20 = (float)r20, r21 = (float)r21, r22 = (float)r22,
+            tx = (float)tx, ty = (float)ty, tz = (float)tz,
+            s = (float)s
         };
+    }
 
-        // Optional: compute normals if you need lighting to look correct
-        // mesh.Normals = MeshGeometry3D.CalculateNormals(mesh.Positions, mesh.Indices);
+    // Main API: GPU rigid transform
+    public static ScanPointXYZ[] RigidTransform3D_GPU(ScanPointXYZ[] points, RigidTf rt)
+    {
+        if (points == null || points.Length == 0) return Array.Empty<ScanPointXYZ>();
 
-        var mat = new PhongMaterial
-        {
-            DiffuseColor = new Color4(color.Red, color.Green, color.Blue, opacity),
-            AmbientColor = new Color4(color.Red, color.Green, color.Blue, opacity) * 0.25f
-        };
+        using var dSrc = _acc.Allocate1D<ScanPointXYZ>(points.Length);
+        using var dDst = _acc.Allocate1D<ScanPointXYZ>(points.Length);
 
-        return new MeshGeometryModel3D
-        {
-            Geometry = mesh,
-            Material = mat,
-            CullMode = twoSided ? D3DCull.None : D3DCull.Back,
-            IsHitTestVisible = false
-        };
+        dSrc.CopyFromCPU(points);
+
+        _kernel(points.Length, dSrc.View, dDst.View, rt);
+        _acc.Synchronize();
+
+        var outPts = new ScanPointXYZ[points.Length];
+        dDst.CopyToCPU(outPts);
+        return outPts;
     }
 }
