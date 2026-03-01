@@ -1,19 +1,86 @@
-public static PointCloud RigidTransform3D(PointCloud cloud, Transform transform)
+using System;
+using ILGPU;
+using ILGPU.Runtime;
+
+// Your point type (must be blittable for best performance).
+public struct ScanPointXYZ
 {
-    // 1) Extract to array (YOU decide best way)
-    var pts = cloud.PointsArray; // ideally already an array for speed
+    public float X, Y, Z;
+    public ScanPointXYZ(float x, float y, float z) { X = x; Y = y; Z = z; }
+}
 
-    // 2) Convert your transform to RigidTf
-    var rt = GpuRigidTransform.ToRigidTf(
-        transform.r00, transform.r01, transform.r02,
-        transform.r10, transform.r11, transform.r12,
-        transform.r20, transform.r21, transform.r22,
-        transform.tx,  transform.ty,  transform.tz,
-        transform.s
-    );
+// Uniform-scale + 3x3 + translation (blittable)
+public struct RigidTf
+{
+    public float r00, r01, r02;
+    public float r10, r11, r12;
+    public float r20, r21, r22;
+    public float tx, ty, tz;
+    public float s;
+}
 
-    // 3) Run GPU
-    var outPts = GpuRigidTransform.RigidTransform3D_GPU(pts, rt);
+public static class GpuRigidTransform
+{
+    // Cache these so you DON'T recreate them every call.
+    private static readonly Context _ctx = Context.CreateDefault();
+    private static readonly Accelerator _acc = _ctx.CreateDefaultAccelerator();
+    private static readonly Action<Index1D, ArrayView<ScanPointXYZ>, ArrayView<ScanPointXYZ>, RigidTf> _kernel
+        = _acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<ScanPointXYZ>, ArrayView<ScanPointXYZ>, RigidTf>(Kernel);
 
-    return new PointCloud(outPts);
+    // GPU kernel
+    private static void Kernel(
+        Index1D i,
+        ArrayView<ScanPointXYZ> src,
+        ArrayView<ScanPointXYZ> dst,
+        RigidTf rt)
+    {
+        if (i >= src.Length) return;
+
+        var p = src[i];
+        float x = p.X, y = p.Y, z = p.Z;
+        float s = rt.s;
+
+        dst[i] = new ScanPointXYZ(
+            s * (rt.r00 * x + rt.r01 * y + rt.r02 * z) + rt.tx,
+            s * (rt.r10 * x + rt.r11 * y + rt.r12 * z) + rt.ty,
+            s * (rt.r20 * x + rt.r21 * y + rt.r22 * z) + rt.tz
+        );
+    }
+
+    // Convert your Transform -> RigidTf
+    // Replace this with YOUR transform extraction (Matrix3D, your tuple, etc).
+    public static RigidTf ToRigidTf(
+        double r00, double r01, double r02,
+        double r10, double r11, double r12,
+        double r20, double r21, double r22,
+        double tx, double ty, double tz,
+        double s)
+    {
+        return new RigidTf
+        {
+            r00 = (float)r00, r01 = (float)r01, r02 = (float)r02,
+            r10 = (float)r10, r11 = (float)r11, r12 = (float)r12,
+            r20 = (float)r20, r21 = (float)r21, r22 = (float)r22,
+            tx = (float)tx, ty = (float)ty, tz = (float)tz,
+            s = (float)s
+        };
+    }
+
+    // Main API: GPU rigid transform
+    public static ScanPointXYZ[] RigidTransform3D_GPU(ScanPointXYZ[] points, RigidTf rt)
+    {
+        if (points == null || points.Length == 0) return Array.Empty<ScanPointXYZ>();
+
+        using var dSrc = _acc.Allocate1D<ScanPointXYZ>(points.Length);
+        using var dDst = _acc.Allocate1D<ScanPointXYZ>(points.Length);
+
+        dSrc.CopyFromCPU(points);
+
+        _kernel(points.Length, dSrc.View, dDst.View, rt);
+        _acc.Synchronize();
+
+        var outPts = new ScanPointXYZ[points.Length];
+        dDst.CopyToCPU(outPts);
+        return outPts;
+    }
 }
