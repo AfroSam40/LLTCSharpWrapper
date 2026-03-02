@@ -1,86 +1,37 @@
 using System;
-using ILGPU;
-using ILGPU.Runtime;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Threading.Tasks;
 
-// Your point type (must be blittable for best performance).
-public struct ScanPointXYZ
+public static class PCP
 {
-    public float X, Y, Z;
-    public ScanPointXYZ(float x, float y, float z) { X = x; Y = y; Z = z; }
-}
-
-// Uniform-scale + 3x3 + translation (blittable)
-public struct RigidTf
-{
-    public float r00, r01, r02;
-    public float r10, r11, r12;
-    public float r20, r21, r22;
-    public float tx, ty, tz;
-    public float s;
-}
-
-public static class GpuRigidTransform
-{
-    // Cache these so you DON'T recreate them every call.
-    private static readonly Context _ctx = Context.CreateDefault();
-    private static readonly Accelerator _acc = _ctx.CreateDefaultAccelerator();
-    private static readonly Action<Index1D, ArrayView<ScanPointXYZ>, ArrayView<ScanPointXYZ>, RigidTf> _kernel
-        = _acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<ScanPointXYZ>, ArrayView<ScanPointXYZ>, RigidTf>(Kernel);
-
-    // GPU kernel
-    private static void Kernel(
-        Index1D i,
-        ArrayView<ScanPointXYZ> src,
-        ArrayView<ScanPointXYZ> dst,
-        RigidTf rt)
+    public static PointCloud VoxelDownSample(PointCloud cloud, double cellSize)
     {
-        if (i >= src.Length) return;
+        var pts = cloud?.Points;
+        if (pts == null || pts.Count == 0 || cellSize <= 0) return cloud;
 
-        var p = src[i];
-        float x = p.X, y = p.Y, z = p.Z;
-        float s = rt.s;
+        double inv = 1.0 / cellSize;
 
-        dst[i] = new ScanPointXYZ(
-            s * (rt.r00 * x + rt.r01 * y + rt.r02 * z) + rt.tx,
-            s * (rt.r10 * x + rt.r11 * y + rt.r12 * z) + rt.ty,
-            s * (rt.r20 * x + rt.r21 * y + rt.r22 * z) + rt.tz
-        );
-    }
+        // "seen voxels" set: key -> dummy byte
+        var seen = new ConcurrentDictionary<long, byte>(Environment.ProcessorCount, pts.Count / 8);
+        var result = new ConcurrentBag<ScanPointXYZ>();
 
-    // Convert your Transform -> RigidTf
-    // Replace this with YOUR transform extraction (Matrix3D, your tuple, etc).
-    public static RigidTf ToRigidTf(
-        double r00, double r01, double r02,
-        double r10, double r11, double r12,
-        double r20, double r21, double r22,
-        double tx, double ty, double tz,
-        double s)
-    {
-        return new RigidTf
+        Parallel.ForEach(pts, p =>
         {
-            r00 = (float)r00, r01 = (float)r01, r02 = (float)r02,
-            r10 = (float)r10, r11 = (float)r11, r12 = (float)r12,
-            r20 = (float)r20, r21 = (float)r21, r22 = (float)r22,
-            tx = (float)tx, ty = (float)ty, tz = (float)tz,
-            s = (float)s
-        };
-    }
+            int ix = (int)Math.Floor(p.X * inv);
+            int iy = (int)Math.Floor(p.Y * inv);
+            int iz = (int)Math.Floor(p.Z * inv);
 
-    // Main API: GPU rigid transform
-    public static ScanPointXYZ[] RigidTransform3D_GPU(ScanPointXYZ[] points, RigidTf rt)
-    {
-        if (points == null || points.Length == 0) return Array.Empty<ScanPointXYZ>();
+            // Pack 3 signed ints into one 64-bit key (stable + fast)
+            long key =
+                ((long)(ix & 0x1FFFFF) << 42) |
+                ((long)(iy & 0x1FFFFF) << 21) |
+                ((long)(iz & 0x1FFFFF));
 
-        using var dSrc = _acc.Allocate1D<ScanPointXYZ>(points.Length);
-        using var dDst = _acc.Allocate1D<ScanPointXYZ>(points.Length);
+            if (seen.TryAdd(key, 0))
+                result.Add(p);
+        });
 
-        dSrc.CopyFromCPU(points);
-
-        _kernel(points.Length, dSrc.View, dDst.View, rt);
-        _acc.Synchronize();
-
-        var outPts = new ScanPointXYZ[points.Length];
-        dDst.CopyToCPU(outPts);
-        return outPts;
+        return new PointCloud(result);
     }
 }
