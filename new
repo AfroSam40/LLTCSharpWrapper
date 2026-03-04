@@ -1,148 +1,53 @@
 using System;
-using System.Buffers.Binary;
 using System.Collections.Generic;
-using System.IO;
-using System.IO.Compression;
-using System.Runtime.InteropServices;
+using TwinCAT.Ads;
+using TwinCAT.Ads.TypeSystem;
+using TwinCAT.TypeSystem;
 
-public struct Point3f { public float X, Y, Z; public Point3f(float x,float y,float z){X=x;Y=y;Z=z;} }
-public struct Point3d { public double X, Y, Z; public Point3d(double x,double y,double z){X=x;Y=y;Z=z;} }
-
-public static class PointCloudCodec
+public static class TcMainSymbolSearch
 {
-    // File/header layout:
-    // [0..3]   magic "PCD1"
-    // [4]      type: 1=float32 xyz, 2=float64 xyz
-    // [5..7]   reserved
-    // [8..11]  pointCount (int32 little-endian)
-    // [12..]   raw interleaved xyz bytes (compressed stream wraps whole payload)
-
-    private static readonly byte[] Magic = { (byte)'P', (byte)'C', (byte)'D', (byte)'1' };
-
-    // -------------------- FLOAT --------------------
-    public static byte[] SerializeFloat(Point3f[] pts)
+    public static string? FindInMain(string amsNetId, int port, string targetName)
     {
-        int n = pts?.Length ?? 0;
-        int payloadBytes = n * 3 * sizeof(float);
-        byte[] buf = new byte[12 + payloadBytes];
+        using var client = new AdsClient();
+        client.Connect(amsNetId, port);
 
-        // header
-        Buffer.BlockCopy(Magic, 0, buf, 0, 4);
-        buf[4] = 1; // float32
-        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(8, 4), n);
+        ISymbolLoader loader = SymbolLoaderFactory.Create(client, SymbolLoaderSettings.Default);
 
-        // payload (interleaved xyz)
-        Span<byte> payload = buf.AsSpan(12);
-        var floats = MemoryMarshal.Cast<byte, float>(payload);
-        for (int i = 0, j = 0; i < n; i++)
+        // Find top-level MAIN
+        ISymbol? main = null;
+        foreach (ISymbol s in loader.Symbols)
         {
-            floats[j++] = pts[i].X;
-            floats[j++] = pts[i].Y;
-            floats[j++] = pts[i].Z;
+            if (string.Equals(s.InstanceName, "MAIN", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(s.InstancePath, "MAIN", StringComparison.OrdinalIgnoreCase))
+            {
+                main = s;
+                break;
+            }
         }
-        return buf;
+
+        if (main == null)
+            return null;
+
+        // Optional: if user searches for MAIN itself
+        if (string.Equals(targetName, "MAIN", StringComparison.OrdinalIgnoreCase))
+            return main.InstancePath;
+
+        // Search recursively under MAIN
+        var match = FindByNameRecursive(main.SubSymbols, targetName);
+        return match?.InstancePath; // e.g. MAIN.myStruct.myMember
     }
 
-    public static Point3f[] DeserializeFloat(byte[] raw)
+    private static ISymbol? FindByNameRecursive(IEnumerable<ISymbol> symbols, string targetName)
     {
-        ValidateHeader(raw, expectedType: 1, out int n);
-        var payload = raw.AsSpan(12);
-        var floats = MemoryMarshal.Cast<byte, float>(payload);
-
-        var pts = new Point3f[n];
-        for (int i = 0, j = 0; i < n; i++)
-            pts[i] = new Point3f(floats[j++], floats[j++], floats[j++]);
-        return pts;
-    }
-
-    // -------------------- DOUBLE --------------------
-    public static byte[] SerializeDouble(Point3d[] pts)
-    {
-        int n = pts?.Length ?? 0;
-        int payloadBytes = n * 3 * sizeof(double);
-        byte[] buf = new byte[12 + payloadBytes];
-
-        Buffer.BlockCopy(Magic, 0, buf, 0, 4);
-        buf[4] = 2; // float64
-        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(8, 4), n);
-
-        Span<byte> payload = buf.AsSpan(12);
-        var doubles = MemoryMarshal.Cast<byte, double>(payload);
-        for (int i = 0, j = 0; i < n; i++)
+        foreach (var s in symbols)
         {
-            doubles[j++] = pts[i].X;
-            doubles[j++] = pts[i].Y;
-            doubles[j++] = pts[i].Z;
+            if (string.Equals(s.InstanceName, targetName, StringComparison.OrdinalIgnoreCase))
+                return s;
+
+            var child = FindByNameRecursive(s.SubSymbols, targetName);
+            if (child != null)
+                return child;
         }
-        return buf;
-    }
-
-    public static Point3d[] DeserializeDouble(byte[] raw)
-    {
-        ValidateHeader(raw, expectedType: 2, out int n);
-        var payload = raw.AsSpan(12);
-        var doubles = MemoryMarshal.Cast<byte, double>(payload);
-
-        var pts = new Point3d[n];
-        for (int i = 0, j = 0; i < n; i++)
-            pts[i] = new Point3d(doubles[j++], doubles[j++], doubles[j++]);
-        return pts;
-    }
-
-    // -------------------- COMPRESS / DECOMPRESS --------------------
-    public static byte[] CompressBrotli(byte[] raw, int level = 6)
-    {
-        using var ms = new MemoryStream();
-        using (var bs = new BrotliStream(ms, (CompressionLevel)Math.Clamp(level, 0, 11), leaveOpen: true))
-            bs.Write(raw, 0, raw.Length);
-        return ms.ToArray();
-    }
-
-    public static byte[] DecompressBrotli(byte[] compressed)
-    {
-        using var src = new MemoryStream(compressed);
-        using var bs = new BrotliStream(src, CompressionMode.Decompress);
-        using var dst = new MemoryStream();
-        bs.CopyTo(dst);
-        return dst.ToArray();
-    }
-
-    public static byte[] CompressGZip(byte[] raw, CompressionLevel level = CompressionLevel.Optimal)
-    {
-        using var ms = new MemoryStream();
-        using (var gz = new GZipStream(ms, level, leaveOpen: true))
-            gz.Write(raw, 0, raw.Length);
-        return ms.ToArray();
-    }
-
-    public static byte[] DecompressGZip(byte[] compressed)
-    {
-        using var src = new MemoryStream(compressed);
-        using var gz = new GZipStream(src, CompressionMode.Decompress);
-        using var dst = new MemoryStream();
-        gz.CopyTo(dst);
-        return dst.ToArray();
-    }
-
-    // -------------------- ONE-LINERS: POINTS -> COMPRESSED BYTES --------------------
-    public static byte[] EncodeFloatBrotli(Point3f[] pts, int brotliLevel = 6) => CompressBrotli(SerializeFloat(pts), brotliLevel);
-    public static Point3f[] DecodeFloatBrotli(byte[] bytes) => DeserializeFloat(DecompressBrotli(bytes));
-
-    public static byte[] EncodeDoubleBrotli(Point3d[] pts, int brotliLevel = 6) => CompressBrotli(SerializeDouble(pts), brotliLevel);
-    public static Point3d[] DecodeDoubleBrotli(byte[] bytes) => DeserializeDouble(DecompressBrotli(bytes));
-
-    // -------------------- FILE HELPERS --------------------
-    public static void SaveBytes(string path, byte[] bytes) => File.WriteAllBytes(path, bytes);
-    public static byte[] LoadBytes(string path) => File.ReadAllBytes(path);
-
-    // -------------------- INTERNAL --------------------
-    private static void ValidateHeader(byte[] raw, byte expectedType, out int n)
-    {
-        if (raw == null || raw.Length < 12) throw new InvalidDataException("Buffer too small.");
-        if (raw[0] != Magic[0] || raw[1] != Magic[1] || raw[2] != Magic[2] || raw[3] != Magic[3])
-            throw new InvalidDataException("Bad magic.");
-        if (raw[4] != expectedType) throw new InvalidDataException($"Unexpected type {raw[4]}.");
-        n = BinaryPrimitives.ReadInt32LittleEndian(raw.AsSpan(8, 4));
-        if (n < 0) throw new InvalidDataException("Negative point count.");
+        return null;
     }
 }
