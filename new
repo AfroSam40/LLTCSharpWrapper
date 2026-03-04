@@ -1,37 +1,148 @@
 using System;
-using System.Collections.Concurrent;
+using System.Buffers.Binary;
 using System.Collections.Generic;
-using System.Threading.Tasks;
+using System.IO;
+using System.IO.Compression;
+using System.Runtime.InteropServices;
 
-public static class PCP
+public struct Point3f { public float X, Y, Z; public Point3f(float x,float y,float z){X=x;Y=y;Z=z;} }
+public struct Point3d { public double X, Y, Z; public Point3d(double x,double y,double z){X=x;Y=y;Z=z;} }
+
+public static class PointCloudCodec
 {
-    public static PointCloud VoxelDownSample(PointCloud cloud, double cellSize)
+    // File/header layout:
+    // [0..3]   magic "PCD1"
+    // [4]      type: 1=float32 xyz, 2=float64 xyz
+    // [5..7]   reserved
+    // [8..11]  pointCount (int32 little-endian)
+    // [12..]   raw interleaved xyz bytes (compressed stream wraps whole payload)
+
+    private static readonly byte[] Magic = { (byte)'P', (byte)'C', (byte)'D', (byte)'1' };
+
+    // -------------------- FLOAT --------------------
+    public static byte[] SerializeFloat(Point3f[] pts)
     {
-        var pts = cloud?.Points;
-        if (pts == null || pts.Count == 0 || cellSize <= 0) return cloud;
+        int n = pts?.Length ?? 0;
+        int payloadBytes = n * 3 * sizeof(float);
+        byte[] buf = new byte[12 + payloadBytes];
 
-        double inv = 1.0 / cellSize;
+        // header
+        Buffer.BlockCopy(Magic, 0, buf, 0, 4);
+        buf[4] = 1; // float32
+        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(8, 4), n);
 
-        // "seen voxels" set: key -> dummy byte
-        var seen = new ConcurrentDictionary<long, byte>(Environment.ProcessorCount, pts.Count / 8);
-        var result = new ConcurrentBag<ScanPointXYZ>();
-
-        Parallel.ForEach(pts, p =>
+        // payload (interleaved xyz)
+        Span<byte> payload = buf.AsSpan(12);
+        var floats = MemoryMarshal.Cast<byte, float>(payload);
+        for (int i = 0, j = 0; i < n; i++)
         {
-            int ix = (int)Math.Floor(p.X * inv);
-            int iy = (int)Math.Floor(p.Y * inv);
-            int iz = (int)Math.Floor(p.Z * inv);
+            floats[j++] = pts[i].X;
+            floats[j++] = pts[i].Y;
+            floats[j++] = pts[i].Z;
+        }
+        return buf;
+    }
 
-            // Pack 3 signed ints into one 64-bit key (stable + fast)
-            long key =
-                ((long)(ix & 0x1FFFFF) << 42) |
-                ((long)(iy & 0x1FFFFF) << 21) |
-                ((long)(iz & 0x1FFFFF));
+    public static Point3f[] DeserializeFloat(byte[] raw)
+    {
+        ValidateHeader(raw, expectedType: 1, out int n);
+        var payload = raw.AsSpan(12);
+        var floats = MemoryMarshal.Cast<byte, float>(payload);
 
-            if (seen.TryAdd(key, 0))
-                result.Add(p);
-        });
+        var pts = new Point3f[n];
+        for (int i = 0, j = 0; i < n; i++)
+            pts[i] = new Point3f(floats[j++], floats[j++], floats[j++]);
+        return pts;
+    }
 
-        return new PointCloud(result);
+    // -------------------- DOUBLE --------------------
+    public static byte[] SerializeDouble(Point3d[] pts)
+    {
+        int n = pts?.Length ?? 0;
+        int payloadBytes = n * 3 * sizeof(double);
+        byte[] buf = new byte[12 + payloadBytes];
+
+        Buffer.BlockCopy(Magic, 0, buf, 0, 4);
+        buf[4] = 2; // float64
+        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(8, 4), n);
+
+        Span<byte> payload = buf.AsSpan(12);
+        var doubles = MemoryMarshal.Cast<byte, double>(payload);
+        for (int i = 0, j = 0; i < n; i++)
+        {
+            doubles[j++] = pts[i].X;
+            doubles[j++] = pts[i].Y;
+            doubles[j++] = pts[i].Z;
+        }
+        return buf;
+    }
+
+    public static Point3d[] DeserializeDouble(byte[] raw)
+    {
+        ValidateHeader(raw, expectedType: 2, out int n);
+        var payload = raw.AsSpan(12);
+        var doubles = MemoryMarshal.Cast<byte, double>(payload);
+
+        var pts = new Point3d[n];
+        for (int i = 0, j = 0; i < n; i++)
+            pts[i] = new Point3d(doubles[j++], doubles[j++], doubles[j++]);
+        return pts;
+    }
+
+    // -------------------- COMPRESS / DECOMPRESS --------------------
+    public static byte[] CompressBrotli(byte[] raw, int level = 6)
+    {
+        using var ms = new MemoryStream();
+        using (var bs = new BrotliStream(ms, (CompressionLevel)Math.Clamp(level, 0, 11), leaveOpen: true))
+            bs.Write(raw, 0, raw.Length);
+        return ms.ToArray();
+    }
+
+    public static byte[] DecompressBrotli(byte[] compressed)
+    {
+        using var src = new MemoryStream(compressed);
+        using var bs = new BrotliStream(src, CompressionMode.Decompress);
+        using var dst = new MemoryStream();
+        bs.CopyTo(dst);
+        return dst.ToArray();
+    }
+
+    public static byte[] CompressGZip(byte[] raw, CompressionLevel level = CompressionLevel.Optimal)
+    {
+        using var ms = new MemoryStream();
+        using (var gz = new GZipStream(ms, level, leaveOpen: true))
+            gz.Write(raw, 0, raw.Length);
+        return ms.ToArray();
+    }
+
+    public static byte[] DecompressGZip(byte[] compressed)
+    {
+        using var src = new MemoryStream(compressed);
+        using var gz = new GZipStream(src, CompressionMode.Decompress);
+        using var dst = new MemoryStream();
+        gz.CopyTo(dst);
+        return dst.ToArray();
+    }
+
+    // -------------------- ONE-LINERS: POINTS -> COMPRESSED BYTES --------------------
+    public static byte[] EncodeFloatBrotli(Point3f[] pts, int brotliLevel = 6) => CompressBrotli(SerializeFloat(pts), brotliLevel);
+    public static Point3f[] DecodeFloatBrotli(byte[] bytes) => DeserializeFloat(DecompressBrotli(bytes));
+
+    public static byte[] EncodeDoubleBrotli(Point3d[] pts, int brotliLevel = 6) => CompressBrotli(SerializeDouble(pts), brotliLevel);
+    public static Point3d[] DecodeDoubleBrotli(byte[] bytes) => DeserializeDouble(DecompressBrotli(bytes));
+
+    // -------------------- FILE HELPERS --------------------
+    public static void SaveBytes(string path, byte[] bytes) => File.WriteAllBytes(path, bytes);
+    public static byte[] LoadBytes(string path) => File.ReadAllBytes(path);
+
+    // -------------------- INTERNAL --------------------
+    private static void ValidateHeader(byte[] raw, byte expectedType, out int n)
+    {
+        if (raw == null || raw.Length < 12) throw new InvalidDataException("Buffer too small.");
+        if (raw[0] != Magic[0] || raw[1] != Magic[1] || raw[2] != Magic[2] || raw[3] != Magic[3])
+            throw new InvalidDataException("Bad magic.");
+        if (raw[4] != expectedType) throw new InvalidDataException($"Unexpected type {raw[4]}.");
+        n = BinaryPrimitives.ReadInt32LittleEndian(raw.AsSpan(8, 4));
+        if (n < 0) throw new InvalidDataException("Negative point count.");
     }
 }
