@@ -1,28 +1,21 @@
-using BenchmarkDotNet.Attributes;
-using BenchmarkDotNet.Running;
+using System;
+using System.Diagnostics;
 
-[MemoryDiagnoser]
-public class LoopBench
+class Program
 {
-    private const int N = 20_000_000;
-    private float[] x = new float[N];
-    private float[] y = new float[N];
-    private float[] z = new float[N];
-
-    // Simple affine-like update (keeps it bandwidth-ish like point transforms)
-    [Benchmark]
-    public void ForLoop()
+    static void Main()
     {
-        for (int i = 0; i < N; i++)
-        {
-            x[i] = x[i] * 1.0001f + 0.01f;
-            y[i] = y[i] * 0.9999f - 0.02f;
-            z[i] = z[i] * 1.0000f + 0.03f;
-        }
-    }
-}
+        const int N = 100_000_000;
+        double sum = 0;
 
-public class Program
-{
-    public static void Main(string[] args) => BenchmarkRunner.Run<LoopBench>();
+        var sw = Stopwatch.StartNew();
+
+        for (int i = 0; i < N; i++)
+            sum += i * 0.000001;
+
+        sw.Stop();
+
+        Console.WriteLine($"Sum: {sum}");
+        Console.WriteLine($"Elapsed: {sw.ElapsedMilliseconds} ms");
+    }
 }
