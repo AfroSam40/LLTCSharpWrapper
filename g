@@ -1,15 +1,14 @@
-import pyperf
+import time
 
-N = 20_000_000
+N = 100_000_000
+s = 0.0
 
-def bench():
-    x = [0.0] * N
-    y = [0.0] * N
-    z = [0.0] * N
-    for i in range(N):
-        x[i] = x[i] * 1.0001 + 0.01
-        y[i] = y[i] * 0.9999 - 0.02
-        z[i] = z[i] * 1.0000 + 0.03
+start = time.perf_counter()
 
-runner = pyperf.Runner()
-runner.bench_func("for_loop", bench)
+for i in range(N):
+    s += i * 0.000001
+
+elapsed_ms = (time.perf_counter() - start) * 1000
+
+print(f"Sum: {s}")
+print(f"Elapsed: {elapsed_ms:.2f} ms")
