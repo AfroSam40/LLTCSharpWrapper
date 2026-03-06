@@ -1,53 +1,28 @@
-using System;
-using System.Collections.Generic;
-using TwinCAT.Ads;
-using TwinCAT.Ads.TypeSystem;
-using TwinCAT.TypeSystem;
+using BenchmarkDotNet.Attributes;
+using BenchmarkDotNet.Running;
 
-public static class TcMainSymbolSearch
+[MemoryDiagnoser]
+public class LoopBench
 {
-    public static string? FindInMain(string amsNetId, int port, string targetName)
+    private const int N = 20_000_000;
+    private float[] x = new float[N];
+    private float[] y = new float[N];
+    private float[] z = new float[N];
+
+    // Simple affine-like update (keeps it bandwidth-ish like point transforms)
+    [Benchmark]
+    public void ForLoop()
     {
-        using var client = new AdsClient();
-        client.Connect(amsNetId, port);
-
-        ISymbolLoader loader = SymbolLoaderFactory.Create(client, SymbolLoaderSettings.Default);
-
-        // Find top-level MAIN
-        ISymbol? main = null;
-        foreach (ISymbol s in loader.Symbols)
+        for (int i = 0; i < N; i++)
         {
-            if (string.Equals(s.InstanceName, "MAIN", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(s.InstancePath, "MAIN", StringComparison.OrdinalIgnoreCase))
-            {
-                main = s;
-                break;
-            }
+            x[i] = x[i] * 1.0001f + 0.01f;
+            y[i] = y[i] * 0.9999f - 0.02f;
+            z[i] = z[i] * 1.0000f + 0.03f;
         }
-
-        if (main == null)
-            return null;
-
-        // Optional: if user searches for MAIN itself
-        if (string.Equals(targetName, "MAIN", StringComparison.OrdinalIgnoreCase))
-            return main.InstancePath;
-
-        // Search recursively under MAIN
-        var match = FindByNameRecursive(main.SubSymbols, targetName);
-        return match?.InstancePath; // e.g. MAIN.myStruct.myMember
     }
+}
 
-    private static ISymbol? FindByNameRecursive(IEnumerable<ISymbol> symbols, string targetName)
-    {
-        foreach (var s in symbols)
-        {
-            if (string.Equals(s.InstanceName, targetName, StringComparison.OrdinalIgnoreCase))
-                return s;
-
-            var child = FindByNameRecursive(s.SubSymbols, targetName);
-            if (child != null)
-                return child;
-        }
-        return null;
-    }
+public class Program
+{
+    public static void Main(string[] args) => BenchmarkRunner.Run<LoopBench>();
 }
