@@ -1,1 +1,15 @@
-Still need to incorporate the transform from scanner coordinates to machine coordinates. The scanner and probe will locate one fiducial near the front of the gantry work area to establish a common reference. Feature locations from CAD can then be transformed first into the work-object frame (using the pallet fiducial) and then into the machine coordinate frame (using the fiducial located by the probe). This will enable compensation for pallet-to-machine error stack-up
+import pyperf
+
+N = 20_000_000
+
+def bench():
+    x = [0.0] * N
+    y = [0.0] * N
+    z = [0.0] * N
+    for i in range(N):
+        x[i] = x[i] * 1.0001 + 0.01
+        y[i] = y[i] * 0.9999 - 0.02
+        z[i] = z[i] * 1.0000 + 0.03
+
+runner = pyperf.Runner()
+runner.bench_func("for_loop", bench)
