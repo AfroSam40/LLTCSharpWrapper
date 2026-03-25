@@ -1,97 +1,63 @@
-public static Vector3[] OrderCornersTLTRBRBL(List<ScanPointXYZ> cornersPts)
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Numerics;
+
+public static Vector3[] OrderCornersFromKnownOrigin(
+    List<ScanPointXYZ> cornersPts,
+    Vector3 knownOrigin,
+    Vector3 xHint)
 {
     if (cornersPts == null || cornersPts.Count != 4)
         throw new ArgumentException("Need 4 corners.");
 
-    var pts = cornersPts.Select(pt => pt.ToVector3()).ToArray();
-    var c = (pts[0] + pts[1] + pts[2] + pts[3]) * 0.25f;
+    var pts = cornersPts.Select(p => p.ToVector3()).ToArray();
 
-    // Order-independent normal from all 4 points
-    Vector3 n = Vector3.Zero;
-    for (int i = 0; i < 4; i++)
-    {
-        var a = pts[i] - c;
-        var b = pts[(i + 1) & 3] - c;
-        n += Vector3.Cross(a, b);
-    }
-    n = n.LengthSquared() > 1e-12f ? Vector3.Normalize(n) : Vector3.UnitZ;
+    // Pick detected corner nearest the known origin
+    int iOrigin = Enumerable.Range(0, 4)
+        .OrderBy(i => Vector3.DistanceSquared(pts[i], knownOrigin))
+        .First();
 
-    // Temporary in-plane basis for cyclic ordering
-    var u0 = pts[0] - c;
-    u0 -= n * Vector3.Dot(u0, n);
-    u0 = u0.LengthSquared() > 1e-12f ? Vector3.Normalize(u0) : Vector3.UnitX;
-    var v0 = Vector3.Normalize(Vector3.Cross(n, u0));
+    var origin = pts[iOrigin];
 
-    // Cyclic order around centroid
-    var ccw = pts
-        .Select(p =>
-        {
-            var d = p - c;
-            return new
-            {
-                P = p,
-                A = MathF.Atan2(Vector3.Dot(d, v0), Vector3.Dot(d, u0))
-            };
-        })
-        .OrderBy(t => t.A)
-        .Select(t => t.P)
+    var others = Enumerable.Range(0, 4)
+        .Where(i => i != iOrigin)
+        .Select(i => pts[i])
         .ToArray();
 
-    // Stable axis from averaged opposite edges
-    var e0 = ccw[1] - ccw[0];
-    var e1 = ccw[2] - ccw[3];
-    var x = e0 + e1;
-    if (x.LengthSquared() <= 1e-12f)
-        x = e0.LengthSquared() > e1.LengthSquared() ? e0 : e1;
-    x = Vector3.Normalize(x);
+    // Opposite corner is farthest from origin
+    var opposite = others
+        .OrderByDescending(p => Vector3.DistanceSquared(p, origin))
+        .First();
 
-    var y = Vector3.Normalize(Vector3.Cross(n, x));
+    // Remaining two are adjacent corners
+    var adj = others.Where(p => p != opposite).ToArray();
+    var a = adj[0];
+    var b = adj[1];
 
-    // Project using stable basis
-    var p2 = pts.Select(p =>
+    // Plane normal from origin + adjacent edges
+    var n = Vector3.Cross(a - origin, b - origin);
+    n = n.LengthSquared() > 1e-12f ? Vector3.Normalize(n) : Vector3.UnitZ;
+
+    // Project xHint into the fiducial plane
+    var xRef = xHint - n * Vector3.Dot(xHint, n);
+    xRef = xRef.LengthSquared() > 1e-12f ? Vector3.Normalize(xRef) : Vector3.Normalize(a - origin);
+
+    var da = Vector3.Normalize(a - origin);
+    var db = Vector3.Normalize(b - origin);
+
+    // Choose the adjacent corner most aligned with +X
+    Vector3 xNeighbor, yNeighbor;
+    if (Vector3.Dot(da, xRef) >= Vector3.Dot(db, xRef))
     {
-        var d = p - c;
-        float px = Vector3.Dot(d, x);
-        float py = Vector3.Dot(d, y);
-        return (P: p, X: px, Y: py, S: px + py, D: px - py);
-    }).ToArray();
-
-    var tl = p2.OrderBy(t => t.S).First().P;
-    var tr = p2.OrderByDescending(t => t.D).First().P;
-    var br = p2.OrderByDescending(t => t.S).First().P;
-    var bl = p2.OrderBy(t => t.D).First().P;
-
-    // Fallback if classification collides
-    if (new[] { tl, tr, br, bl }.Distinct().Count() != 4)
+        xNeighbor = a;
+        yNeighbor = b;
+    }
+    else
     {
-        var cyc = pts
-            .Select(p =>
-            {
-                var d = p - c;
-                return new
-                {
-                    P = p,
-                    X = Vector3.Dot(d, x),
-                    Y = Vector3.Dot(d, y),
-                    A = MathF.Atan2(Vector3.Dot(d, y), Vector3.Dot(d, x))
-                };
-            })
-            .OrderBy(t => t.A)
-            .ToArray();
-
-        int tlIdx = cyc.Select((t, i) => (t, i))
-            .OrderByDescending(t => t.t.Y)
-            .ThenBy(t => t.t.X)
-            .First().i;
-
-        return new[]
-        {
-            cyc[tlIdx].P,
-            cyc[(tlIdx + 3) & 3].P,
-            cyc[(tlIdx + 2) & 3].P,
-            cyc[(tlIdx + 1) & 3].P
-        };
+        xNeighbor = b;
+        yNeighbor = a;
     }
 
-    return new[] { tl, tr, br, bl };
+    return new[] { origin, xNeighbor, opposite, yNeighbor };
 }
