@@ -1,63 +1,98 @@
+using ILGPU;
+using ILGPU.Runtime;
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Linq;
-using System.Numerics;
 
-public static Vector3[] OrderCornersFromKnownOrigin(
-    List<ScanPointXYZ> cornersPts,
-    Vector3 knownOrigin,
-    Vector3 xHint)
+public struct ScanPointXYZ
 {
-    if (cornersPts == null || cornersPts.Count != 4)
-        throw new ArgumentException("Need 4 corners.");
+    public float X;
+    public float Y;
+    public float Z;
 
-    var pts = cornersPts.Select(p => p.ToVector3()).ToArray();
-
-    // Pick detected corner nearest the known origin
-    int iOrigin = Enumerable.Range(0, 4)
-        .OrderBy(i => Vector3.DistanceSquared(pts[i], knownOrigin))
-        .First();
-
-    var origin = pts[iOrigin];
-
-    var others = Enumerable.Range(0, 4)
-        .Where(i => i != iOrigin)
-        .Select(i => pts[i])
-        .ToArray();
-
-    // Opposite corner is farthest from origin
-    var opposite = others
-        .OrderByDescending(p => Vector3.DistanceSquared(p, origin))
-        .First();
-
-    // Remaining two are adjacent corners
-    var adj = others.Where(p => p != opposite).ToArray();
-    var a = adj[0];
-    var b = adj[1];
-
-    // Plane normal from origin + adjacent edges
-    var n = Vector3.Cross(a - origin, b - origin);
-    n = n.LengthSquared() > 1e-12f ? Vector3.Normalize(n) : Vector3.UnitZ;
-
-    // Project xHint into the fiducial plane
-    var xRef = xHint - n * Vector3.Dot(xHint, n);
-    xRef = xRef.LengthSquared() > 1e-12f ? Vector3.Normalize(xRef) : Vector3.Normalize(a - origin);
-
-    var da = Vector3.Normalize(a - origin);
-    var db = Vector3.Normalize(b - origin);
-
-    // Choose the adjacent corner most aligned with +X
-    Vector3 xNeighbor, yNeighbor;
-    if (Vector3.Dot(da, xRef) >= Vector3.Dot(db, xRef))
+    public ScanPointXYZ(float x, float y, float z)
     {
-        xNeighbor = a;
-        yNeighbor = b;
+        X = x;
+        Y = y;
+        Z = z;
     }
-    else
+}
+
+public sealed class PointCloud
+{
+    public List<ScanPointXYZ> Points { get; set; } = new();
+}
+
+public static class PointCloudGpu
+{
+    // Marks 1 if point is inside rect, else 0
+    static void ClipToRectangleKernel(
+        Index1D i,
+        ArrayView<ScanPointXYZ> points,
+        ArrayView<byte> keepMask,
+        float left,
+        float top,
+        float right,
+        float bottom)
     {
-        xNeighbor = b;
-        yNeighbor = a;
+        if (i >= points.Length)
+            return;
+
+        var p = points[i];
+
+        keepMask[i] = (p.X >= left && p.X <= right && p.Y >= top && p.Y <= bottom)
+            ? (byte)1
+            : (byte)0;
     }
 
-    return new[] { origin, xNeighbor, opposite, yNeighbor };
+    public static PointCloud ClipToRectangleXY(
+        Context context,
+        Accelerator accelerator,
+        PointCloud cloud,
+        RectangleF rect)
+    {
+        if (cloud == null || cloud.Points == null || cloud.Points.Count == 0)
+            return new PointCloud();
+
+        // Convert center-based rect to top-left-based rect if needed
+        rect = new RectangleF(
+            rect.X - rect.Width / 2f,
+            rect.Y - rect.Height / 2f,
+            rect.Width,
+            rect.Height);
+
+        var input = cloud.Points.ToArray();
+        var mask = new byte[input.Length];
+
+        using var dPoints = accelerator.Allocate1D(input);
+        using var dMask = accelerator.Allocate1D<byte>(input.Length);
+
+        var kernel = accelerator.LoadAutoGroupedStreamKernel<
+            Index1D,
+            ArrayView<ScanPointXYZ>,
+            ArrayView<byte>,
+            float, float, float, float>(ClipToRectangleKernel);
+
+        float left = rect.Left;
+        float top = rect.Top;
+        float right = rect.Right;
+        float bottom = rect.Bottom;
+
+        kernel(input.Length, dPoints.View, dMask.View, left, top, right, bottom);
+        accelerator.Synchronize();
+
+        dMask.CopyToCPU(mask);
+
+        var result = new List<ScanPointXYZ>();
+        result.Capacity = mask.Count(m => m == 1);
+
+        for (int i = 0; i < input.Length; i++)
+        {
+            if (mask[i] == 1)
+                result.Add(input[i]);
+        }
+
+        return new PointCloud { Points = result };
+    }
 }
