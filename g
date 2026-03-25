@@ -1,98 +1,88 @@
-using ILGPU;
-using ILGPU.Runtime;
 using System;
-using System.Collections.Generic;
 using System.Drawing;
-using System.Linq;
+using System.Threading.Tasks;
 
 public struct ScanPointXYZ
 {
     public float X;
     public float Y;
     public float Z;
-
-    public ScanPointXYZ(float x, float y, float z)
-    {
-        X = x;
-        Y = y;
-        Z = z;
-    }
 }
 
 public sealed class PointCloud
 {
-    public List<ScanPointXYZ> Points { get; set; } = new();
+    public ScanPointXYZ[] Points { get; set; } = Array.Empty<ScanPointXYZ>();
 }
 
-public static class PointCloudGpu
+public static class PointCloudClipper
 {
-    // Marks 1 if point is inside rect, else 0
-    static void ClipToRectangleKernel(
-        Index1D i,
-        ArrayView<ScanPointXYZ> points,
-        ArrayView<byte> keepMask,
-        float left,
-        float top,
-        float right,
-        float bottom)
+    public static PointCloud ClipToRectangleXY(PointCloud cloud, RectangleF rect)
     {
-        if (i >= points.Length)
-            return;
+        var src = cloud?.Points;
+        if (src == null || src.Length == 0)
+            return new PointCloud { Points = Array.Empty<ScanPointXYZ>() };
 
-        var p = points[i];
+        float left   = rect.X - rect.Width * 0.5f;
+        float top    = rect.Y - rect.Height * 0.5f;
+        float right  = left + rect.Width;
+        float bottom = top + rect.Height;
 
-        keepMask[i] = (p.X >= left && p.X <= right && p.Y >= top && p.Y <= bottom)
-            ? (byte)1
-            : (byte)0;
-    }
+        int count = src.Length;
+        int workers = Environment.ProcessorCount;
+        int chunkSize = (count + workers - 1) / workers;
 
-    public static PointCloud ClipToRectangleXY(
-        Context context,
-        Accelerator accelerator,
-        PointCloud cloud,
-        RectangleF rect)
-    {
-        if (cloud == null || cloud.Points == null || cloud.Points.Count == 0)
-            return new PointCloud();
+        var counts = new int[workers];
 
-        // Convert center-based rect to top-left-based rect if needed
-        rect = new RectangleF(
-            rect.X - rect.Width / 2f,
-            rect.Y - rect.Height / 2f,
-            rect.Width,
-            rect.Height);
-
-        var input = cloud.Points.ToArray();
-        var mask = new byte[input.Length];
-
-        using var dPoints = accelerator.Allocate1D(input);
-        using var dMask = accelerator.Allocate1D<byte>(input.Length);
-
-        var kernel = accelerator.LoadAutoGroupedStreamKernel<
-            Index1D,
-            ArrayView<ScanPointXYZ>,
-            ArrayView<byte>,
-            float, float, float, float>(ClipToRectangleKernel);
-
-        float left = rect.Left;
-        float top = rect.Top;
-        float right = rect.Right;
-        float bottom = rect.Bottom;
-
-        kernel(input.Length, dPoints.View, dMask.View, left, top, right, bottom);
-        accelerator.Synchronize();
-
-        dMask.CopyToCPU(mask);
-
-        var result = new List<ScanPointXYZ>();
-        result.Capacity = mask.Count(m => m == 1);
-
-        for (int i = 0; i < input.Length; i++)
+        // Pass 1: count survivors per chunk
+        Parallel.For(0, workers, w =>
         {
-            if (mask[i] == 1)
-                result.Add(input[i]);
+            int start = w * chunkSize;
+            int end = Math.Min(start + chunkSize, count);
+            if (start >= end) return;
+
+            int localCount = 0;
+
+            for (int i = start; i < end; i++)
+            {
+                var p = src[i];
+                if (p.X >= left && p.X <= right && p.Y >= top && p.Y <= bottom)
+                    localCount++;
+            }
+
+            counts[w] = localCount;
+        });
+
+        // Prefix sum to get write offsets
+        var offsets = new int[workers];
+        int total = 0;
+        for (int w = 0; w < workers; w++)
+        {
+            offsets[w] = total;
+            total += counts[w];
         }
 
-        return new PointCloud { Points = result };
+        if (total == 0)
+            return new PointCloud { Points = Array.Empty<ScanPointXYZ>() };
+
+        var dst = new ScanPointXYZ[total];
+
+        // Pass 2: write directly into each thread's assigned slice
+        Parallel.For(0, workers, w =>
+        {
+            int start = w * chunkSize;
+            int end = Math.Min(start + chunkSize, count);
+            if (start >= end) return;
+
+            int write = offsets[w];
+
+            for (int i = start; i < end; i++)
+            {
+                var p = src[i];
+                if (p.X >= left && p.X <= right && p.Y >= top && p.Y <= bottom)
+                    dst[write++] = p;
+            }
+        });
+
+        return new PointCloud { Points = dst };
     }
 }
