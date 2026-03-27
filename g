@@ -1,7 +1,20 @@
-var closest = points
-    .OrderBy(p => Math.Abs(p.Z - target.Z))
-    .ThenBy(p =>
-        (p.X - target.X) * (p.X - target.X) +
-        (p.Y - target.Y) * (p.Y - target.Y) +
-        (p.Z - target.Z) * (p.Z - target.Z))
-    .FirstOrDefault();
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+
+namespace ADSRouteHealthChecker
+{
+    public class Program
+    {
+        public static void Main(string[] args)
+        {
+            Host.CreateDefaultBuilder(args)
+                .UseWindowsService()
+                .ConfigureServices((context, services) =>
+                {
+                    services.AddHostedService<Worker>();
+                })
+                .Build()
+                .Run();
+        }
+    }
+}
