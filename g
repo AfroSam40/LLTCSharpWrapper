@@ -1,20 +1,12 @@
-using System;
-using System.IO;
-
-public static class Logger
-{
-    private static readonly string LogFilePath =
-        Path.Combine(AppContext.BaseDirectory, "app.log");
-
-    public static void Log(string message)
-    {
-        string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}";
-        File.AppendAllText(LogFilePath, line + Environment.NewLine);
-    }
-
-    public static void LogError(string message, Exception ex)
-    {
-        string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ERROR: {message}{Environment.NewLine}{ex}";
-        File.AppendAllText(LogFilePath, line + Environment.NewLine + Environment.NewLine);
-    }
-}
+Progress
+Stitching between scanners and scan passes is working.
+Z-comp has been released on the KU gantry.
+Key learnings so far
+Stitching and Z-comp currently take about 30 seconds.
+The primary constraint appears to be hardware performance.
+Memory is the main bottleneck when retrieving profiles from the scanner controllers and constructing the point cloud.
+After the data is loaded, both the CPU and GPU reach 100% utilization during stitching and Z-comp computation.
+The original goal was to standardize on the same PC used between the dish and TIM scan systems. Based on current results, however, the TIM application will likely require a system with more memory and a higher-performance CPU/GPU.
+Next steps
+Evaluate and define the PC specifications required to achieve target inspection cycle times.
+Continue monitoring system performance as vision inspection runs on Flight 1 parts.
