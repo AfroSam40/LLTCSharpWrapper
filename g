@@ -1,3 +1,8 @@
-python --version
-python -m pip --version
-python -m pip install pythonnet --trusted-host pypi.org --trusted-host files.pythonhosted.org
+from pythonnet import load
+load("coreclr")
+
+import clr
+from System import String
+
+s = String("hello from .NET")
+print(s)
