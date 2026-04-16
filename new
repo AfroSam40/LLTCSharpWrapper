@@ -1,1 +1,53 @@
-Switching Flipper’s elevator linear encoder to an SSI interface will allow the encoder to be used for closed-loop position control rather than only for end-of-move verification. This change will also simplify the PLC code, since the axis will fully manage the encoder. In addition, homing will no longer be required after a power cycle or after motor/gearbox replacement, because the axis will always know its absolute position.
+using System;
+using System.IO;
+using System.IO.Compression;
+
+public static class PointCloudCompression
+{
+    // Lossless: PointCloud -> compressed bytes
+    public static byte[] Compress(PointCloud cloud)
+    {
+        if (cloud == null) throw new ArgumentNullException(nameof(cloud));
+        var pts = cloud.Points;
+        if (pts == null) throw new ArgumentException("PointCloud.Points is null.", nameof(cloud));
+
+        using var raw = new MemoryStream();
+        using (var bw = new BinaryWriter(raw, System.Text.Encoding.UTF8, true))
+        {
+            bw.Write(pts.Count);
+            for (int i = 0; i < pts.Count; i++)
+            {
+                bw.Write(pts[i].X);
+                bw.Write(pts[i].Y);
+                bw.Write(pts[i].Z);
+            }
+        }
+
+        using var compressed = new MemoryStream();
+        using (var bs = new BrotliStream(compressed, CompressionLevel.Optimal, true))
+            raw.WriteTo(bs);
+
+        return compressed.ToArray();
+    }
+
+    // Lossless: compressed bytes -> PointCloud
+    public static PointCloud Uncompress(byte[] compressedBytes)
+    {
+        if (compressedBytes == null) throw new ArgumentNullException(nameof(compressedBytes));
+
+        using var compressed = new MemoryStream(compressedBytes);
+        using var bs = new BrotliStream(compressed, CompressionMode.Decompress);
+        using var raw = new MemoryStream();
+        bs.CopyTo(raw);
+        raw.Position = 0;
+
+        using var br = new BinaryReader(raw);
+        int count = br.ReadInt32();
+        var pts = new System.Collections.Generic.List<ScanPointXYZ>(count);
+
+        for (int i = 0; i < count; i++)
+            pts.Add(new ScanPointXYZ(br.ReadDouble(), br.ReadDouble(), br.ReadDouble()));
+
+        return new PointCloud(pts);
+    }
+}
