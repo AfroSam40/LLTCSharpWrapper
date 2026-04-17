@@ -1,73 +1,100 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
-using System.Runtime.InteropServices;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 
-public static class PointCloudIO
+public sealed class FactoryTelemetryClient : IDisposable
 {
-    public static void SavePointCloud(string filePath, PointCloud cloud)
+    private readonly HttpClient _http;
+    private readonly string _tokenUrl;
+    private readonly string _fileUploadUrl;
+    private readonly string _clientId;
+    private readonly string _clientSecret;
+
+    public FactoryTelemetryClient(string tokenUrl, string fileUploadUrl, HttpClient? httpClient = null)
     {
-        var points = cloud?.Points ?? throw new ArgumentNullException(nameof(cloud));
-        filePath = EnsureExtension(filePath, ".pcd");
+        _tokenUrl = tokenUrl ?? throw new ArgumentNullException(nameof(tokenUrl));
+        _fileUploadUrl = fileUploadUrl ?? throw new ArgumentNullException(nameof(fileUploadUrl));
 
-        int count = points.Count;
-        int headerBytes = sizeof(int);
-        int dataBytes = count * 3 * sizeof(float);
-        byte[] raw = new byte[headerBytes + dataBytes];
+        _clientId = Environment.GetEnvironmentVariable("CLIENT_ID")
+            ?? throw new InvalidOperationException("CLIENT_ID environment variable not found.");
 
-        Buffer.BlockCopy(BitConverter.GetBytes(count), 0, raw, 0, sizeof(int));
+        _clientSecret = Environment.GetEnvironmentVariable("CLIENT_SECRET")
+            ?? throw new InvalidOperationException("CLIENT_SECRET environment variable not found.");
 
-        var span = raw.AsSpan(headerBytes);
-        var floats = MemoryMarshal.Cast<byte, float>(span);
+        _http = httpClient ?? new HttpClient();
+    }
 
-        int xOff = 0;
-        int yOff = count;
-        int zOff = 2 * count;
-
-        for (int i = 0; i < count; i++)
+    public async Task<string> GetAuthTokenAsync(CancellationToken ct = default)
+    {
+        var payload = new
         {
-            floats[xOff + i] = (float)points[i].X;
-            floats[yOff + i] = (float)points[i].Y;
-            floats[zOff + i] = (float)points[i].Z;
+            clientId = _clientId,
+            clientSecret = _clientSecret
+        };
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, _tokenUrl)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json")
+        };
+
+        using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
+        string body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+
+        using var doc = JsonDocument.Parse(body);
+        return doc.RootElement.GetProperty("content").GetString()
+            ?? throw new InvalidOperationException("Token response content was null.");
+    }
+
+    public async Task<string> UploadPointCloudAsync(PointCloud cloud, string dirName, CancellationToken ct = default)
+    {
+        if (cloud == null) throw new ArgumentNullException(nameof(cloud));
+        if (string.IsNullOrWhiteSpace(dirName)) throw new ArgumentNullException(nameof(dirName));
+
+        string token = await GetAuthTokenAsync(ct).ConfigureAwait(false);
+        string key = $"Quadband_Dish_Scan_PCD_{dirName}.XYZ";
+
+        byte[] fileBytes = PointCloudToXyzBytes(cloud);
+
+        using var fileContent = new ByteArrayContent(fileBytes);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+
+        using var form = new MultipartFormDataContent
+        {
+            { fileContent, "file", key },
+            { new StringContent(key), "key" },
+            { new StringContent(key), "DisplayName" }
+        };
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, _fileUploadUrl);
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        req.Content = form;
+
+        using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
+        string body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+
+        return body;
+    }
+
+    private static byte[] PointCloudToXyzBytes(PointCloud cloud)
+    {
+        var points = cloud.Points ?? throw new InvalidOperationException("PointCloud.Points is null.");
+
+        using var ms = new MemoryStream();
+        using (var sw = new StreamWriter(ms, Encoding.UTF8, 1024, true))
+        {
+            foreach (var p in points)
+                sw.WriteLine($"{p.X},{p.Y},{p.Z}");
         }
 
-        using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
-        using var brotli = new BrotliStream(fs, CompressionLevel.Optimal);
-        brotli.Write(raw, 0, raw.Length);
+        return ms.ToArray();
     }
 
-    public static PointCloud LoadPointCloud(string filePath)
-    {
-        if (string.IsNullOrWhiteSpace(filePath))
-            throw new ArgumentNullException(nameof(filePath));
-
-        using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        using var brotli = new BrotliStream(fs, CompressionMode.Decompress);
-        using var ms = new MemoryStream();
-        brotli.CopyTo(ms);
-
-        byte[] raw = ms.ToArray();
-        if (raw.Length < sizeof(int))
-            throw new InvalidDataException("Invalid point cloud file.");
-
-        int count = BitConverter.ToInt32(raw, 0);
-        int expectedBytes = sizeof(int) + count * 3 * sizeof(float);
-        if (raw.Length != expectedBytes)
-            throw new InvalidDataException("Corrupt or incomplete point cloud data.");
-
-        var floats = MemoryMarshal.Cast<byte, float>(raw.AsSpan(sizeof(int)));
-        int xOff = 0;
-        int yOff = count;
-        int zOff = 2 * count;
-
-        var pts = new List<ScanPointXYZ>(count);
-        for (int i = 0; i < count; i++)
-            pts.Add(new ScanPointXYZ(floats[xOff + i], floats[yOff + i], floats[zOff + i]));
-
-        return new PointCloud(pts);
-    }
-
-    private static string EnsureExtension(string path, string ext) =>
-        Path.HasExtension(path) ? path : path + ext;
+    public void Dispose() => _http.Dispose();
 }
