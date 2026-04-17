@@ -1,47 +1,26 @@
-public static async Task<string> UploadPointCloudAsync(
-    string fileName,
-    PointCloud cloud,
-    FactoryTelemetryClient telemetry,
-    CancellationToken ct = default)
+public async Task<string> UploadPointCloudBytesAsync(byte[] fileBytes, string fileName, CancellationToken ct = default)
 {
-    Stopwatch sp = Stopwatch.StartNew();
+    if (fileBytes == null || fileBytes.Length == 0) throw new ArgumentNullException(nameof(fileBytes));
+    if (string.IsNullOrWhiteSpace(fileName)) throw new ArgumentNullException(nameof(fileName));
 
-    var points = cloud?.Points.ToArray() ?? throw new ArgumentNullException(nameof(cloud));
-    fileName = EnsureExtension(fileName, ".pcd");
+    string token = await GetAuthTokenAsync(ct).ConfigureAwait(false);
 
-    int count = points.Length;
-    int headerBytes = sizeof(int);
-    int dataBytes = count * 3 * sizeof(float);
-    byte[] raw = new byte[headerBytes + dataBytes];
+    using var fileContent = new ByteArrayContent(fileBytes);
+    fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
 
-    Buffer.BlockCopy(BitConverter.GetBytes(count), 0, raw, 0, sizeof(int));
-
-    var packed = new float[count * 3];
-    int xOff = 0, yOff = count, zOff = 2 * count;
-
-    Parallel.For(0, count, i =>
+    using var form = new MultipartFormDataContent
     {
-        var p = points[i];
-        packed[xOff + i] = (float)p.X;
-        packed[yOff + i] = (float)p.Y;
-        packed[zOff + i] = (float)p.Z;
-    });
+        { fileContent, "file", fileName },
+        { new StringContent(fileName), "key" },
+        { new StringContent(fileName), "DisplayName" }
+    };
 
-    Buffer.BlockCopy(packed, 0, raw, headerBytes, dataBytes);
+    using var req = new HttpRequestMessage(HttpMethod.Post, _fileUploadUrl);
+    req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+    req.Content = form;
 
-    byte[] compressed;
-    using (var ms = new MemoryStream())
-    {
-        using (var brotli = new BrotliStream(ms, CompressionLevel.Fastest, leaveOpen: true))
-            brotli.Write(raw, 0, raw.Length);
-
-        compressed = ms.ToArray();
-    }
-
-    Debug.Print($"pack+compress time --- {sp.ElapsedMilliseconds} ms");
-
-    string response = await telemetry.UploadPointCloudBytesAsync(compressed, fileName, ct);
-    Debug.Print($"total upload time --- {sp.ElapsedMilliseconds} ms");
-
-    return response;
+    using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
+    string body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+    resp.EnsureSuccessStatusCode();
+    return body;
 }
