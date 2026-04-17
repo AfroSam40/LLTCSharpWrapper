@@ -1,53 +1,24 @@
-using System;
-using System.IO;
-using System.IO.Compression;
-
-public static class PointCloudCompression
+public static void SavePointCloud(string filePath, PointCloud cloud)
 {
-    // Lossless: PointCloud -> compressed bytes
-    public static byte[] Compress(PointCloud cloud)
+    var points = cloud?.Points;
+    if (points == null) throw new ArgumentNullException(nameof(cloud));
+
+    filePath = EnsureExtension(filePath, ".pcd");
+
+    int count = points.Count;
+    byte[] raw = new byte[sizeof(int) + count * 3 * sizeof(float)];
+
+    Buffer.BlockCopy(BitConverter.GetBytes(count), 0, raw, 0, sizeof(int));
+
+    int offset = sizeof(int);
+    for (int i = 0; i < count; i++)
     {
-        if (cloud == null) throw new ArgumentNullException(nameof(cloud));
-        var pts = cloud.Points;
-        if (pts == null) throw new ArgumentException("PointCloud.Points is null.", nameof(cloud));
-
-        using var raw = new MemoryStream();
-        using (var bw = new BinaryWriter(raw, System.Text.Encoding.UTF8, true))
-        {
-            bw.Write(pts.Count);
-            for (int i = 0; i < pts.Count; i++)
-            {
-                bw.Write(pts[i].X);
-                bw.Write(pts[i].Y);
-                bw.Write(pts[i].Z);
-            }
-        }
-
-        using var compressed = new MemoryStream();
-        using (var bs = new BrotliStream(compressed, CompressionLevel.Optimal, true))
-            raw.WriteTo(bs);
-
-        return compressed.ToArray();
+        Buffer.BlockCopy(BitConverter.GetBytes((float)points[i].X), 0, raw, offset, 4); offset += 4;
+        Buffer.BlockCopy(BitConverter.GetBytes((float)points[i].Y), 0, raw, offset, 4); offset += 4;
+        Buffer.BlockCopy(BitConverter.GetBytes((float)points[i].Z), 0, raw, offset, 4); offset += 4;
     }
 
-    // Lossless: compressed bytes -> PointCloud
-    public static PointCloud Uncompress(byte[] compressedBytes)
-    {
-        if (compressedBytes == null) throw new ArgumentNullException(nameof(compressedBytes));
-
-        using var compressed = new MemoryStream(compressedBytes);
-        using var bs = new BrotliStream(compressed, CompressionMode.Decompress);
-        using var raw = new MemoryStream();
-        bs.CopyTo(raw);
-        raw.Position = 0;
-
-        using var br = new BinaryReader(raw);
-        int count = br.ReadInt32();
-        var pts = new System.Collections.Generic.List<ScanPointXYZ>(count);
-
-        for (int i = 0; i < count; i++)
-            pts.Add(new ScanPointXYZ(br.ReadDouble(), br.ReadDouble(), br.ReadDouble()));
-
-        return new PointCloud(pts);
-    }
+    using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
+    using var brotli = new BrotliStream(fs, CompressionLevel.Optimal);
+    brotli.Write(raw, 0, raw.Length);
 }
