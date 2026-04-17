@@ -1,24 +1,73 @@
-public static void SavePointCloud(string filePath, PointCloud cloud)
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.IO.Compression;
+using System.Runtime.InteropServices;
+
+public static class PointCloudIO
 {
-    var points = cloud?.Points;
-    if (points == null) throw new ArgumentNullException(nameof(cloud));
-
-    filePath = EnsureExtension(filePath, ".pcd");
-
-    int count = points.Count;
-    byte[] raw = new byte[sizeof(int) + count * 3 * sizeof(float)];
-
-    Buffer.BlockCopy(BitConverter.GetBytes(count), 0, raw, 0, sizeof(int));
-
-    int offset = sizeof(int);
-    for (int i = 0; i < count; i++)
+    public static void SavePointCloud(string filePath, PointCloud cloud)
     {
-        Buffer.BlockCopy(BitConverter.GetBytes((float)points[i].X), 0, raw, offset, 4); offset += 4;
-        Buffer.BlockCopy(BitConverter.GetBytes((float)points[i].Y), 0, raw, offset, 4); offset += 4;
-        Buffer.BlockCopy(BitConverter.GetBytes((float)points[i].Z), 0, raw, offset, 4); offset += 4;
+        var points = cloud?.Points ?? throw new ArgumentNullException(nameof(cloud));
+        filePath = EnsureExtension(filePath, ".pcd");
+
+        int count = points.Count;
+        int headerBytes = sizeof(int);
+        int dataBytes = count * 3 * sizeof(float);
+        byte[] raw = new byte[headerBytes + dataBytes];
+
+        Buffer.BlockCopy(BitConverter.GetBytes(count), 0, raw, 0, sizeof(int));
+
+        var span = raw.AsSpan(headerBytes);
+        var floats = MemoryMarshal.Cast<byte, float>(span);
+
+        int xOff = 0;
+        int yOff = count;
+        int zOff = 2 * count;
+
+        for (int i = 0; i < count; i++)
+        {
+            floats[xOff + i] = (float)points[i].X;
+            floats[yOff + i] = (float)points[i].Y;
+            floats[zOff + i] = (float)points[i].Z;
+        }
+
+        using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
+        using var brotli = new BrotliStream(fs, CompressionLevel.Optimal);
+        brotli.Write(raw, 0, raw.Length);
     }
 
-    using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
-    using var brotli = new BrotliStream(fs, CompressionLevel.Optimal);
-    brotli.Write(raw, 0, raw.Length);
+    public static PointCloud LoadPointCloud(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+            throw new ArgumentNullException(nameof(filePath));
+
+        using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var brotli = new BrotliStream(fs, CompressionMode.Decompress);
+        using var ms = new MemoryStream();
+        brotli.CopyTo(ms);
+
+        byte[] raw = ms.ToArray();
+        if (raw.Length < sizeof(int))
+            throw new InvalidDataException("Invalid point cloud file.");
+
+        int count = BitConverter.ToInt32(raw, 0);
+        int expectedBytes = sizeof(int) + count * 3 * sizeof(float);
+        if (raw.Length != expectedBytes)
+            throw new InvalidDataException("Corrupt or incomplete point cloud data.");
+
+        var floats = MemoryMarshal.Cast<byte, float>(raw.AsSpan(sizeof(int)));
+        int xOff = 0;
+        int yOff = count;
+        int zOff = 2 * count;
+
+        var pts = new List<ScanPointXYZ>(count);
+        for (int i = 0; i < count; i++)
+            pts.Add(new ScanPointXYZ(floats[xOff + i], floats[yOff + i], floats[zOff + i]));
+
+        return new PointCloud(pts);
+    }
+
+    private static string EnsureExtension(string path, string ext) =>
+        Path.HasExtension(path) ? path : path + ext;
 }
