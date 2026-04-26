@@ -39,6 +39,7 @@ namespace Libs
         private static readonly Action<
             Index1D,
             ArrayView<int>,
+            ArrayView<int>,
             ArrayView<RawProfileInfoGpu>,
             ArrayView<ScanPointXYZ>,
             ArrayView<NullPointGpu>,
@@ -47,6 +48,7 @@ namespace Libs
                 _acc.LoadAutoGroupedStreamKernel<
                     Index1D,
                     ArrayView<int>,
+                    ArrayView<int>,
                     ArrayView<RawProfileInfoGpu>,
                     ArrayView<ScanPointXYZ>,
                     ArrayView<NullPointGpu>,
@@ -54,51 +56,52 @@ namespace Libs
                     double>(RawProfileToPointsKernel);
 
         private static void RawProfileToPointsKernel(
-            Index1D profileIndex,
+            Index1D rawIndex,
             ArrayView<int> rawZ,
+            ArrayView<int> profileIndexPerPoint,
             ArrayView<RawProfileInfoGpu> profiles,
             ArrayView<ScanPointXYZ> validPoints,
             ArrayView<NullPointGpu> nullPoints,
             ArrayView<int> counts,
             double yInterval)
         {
-            if (profileIndex >= profiles.Length)
+            int i = rawIndex;
+            if (i >= rawZ.Length)
                 return;
 
+            int profileIndex = profileIndexPerPoint[i];
             var info = profiles[profileIndex];
 
+            int localIndex = i - info.DataStart;
+            int raw = rawZ[i];
+
+            double x = localIndex * info.XPitch;
             double y = info.RawProfile * yInterval;
 
-            for (int i = 0; i < info.Count; i++)
+            bool isNull =
+                raw == (int)nullTypes.Invalid1 ||
+                raw == (int)nullTypes.Invalid2 ||
+                raw == (int)nullTypes.Deadzone ||
+                raw == (int)nullTypes.JudgmentStandby;
+
+            if (isNull)
             {
-                int raw = rawZ[info.DataStart + i];
-                double x = i * info.XPitch;
+                int idx = Atomic.Add(ref counts[1], 1);
 
-                bool isNull =
-                    raw == (int)nullTypes.Invalid1 ||
-                    raw == (int)nullTypes.Invalid2 ||
-                    raw == (int)nullTypes.Deadzone ||
-                    raw == (int)nullTypes.JudgmentStandby;
-
-                if (isNull)
+                nullPoints[idx] = new NullPointGpu
                 {
-                    int idx = Atomic.Add(ref counts[1], 1);
+                    Point = new ScanPointXYZ(x, y, 0.0),
+                    Reason = (nullTypes)raw
+                };
+            }
+            else
+            {
+                int idx = Atomic.Add(ref counts[0], 1);
 
-                    nullPoints[idx] = new NullPointGpu
-                    {
-                        Point = new ScanPointXYZ(x, y, 0.0),
-                        Reason = (nullTypes)raw
-                    };
-                }
-                else
-                {
-                    int idx = Atomic.Add(ref counts[0], 1);
-
-                    validPoints[idx] = new ScanPointXYZ(
-                        x,
-                        y,
-                        raw / 100000.0);
-                }
+                validPoints[idx] = new ScanPointXYZ(
+                    x,
+                    y,
+                    raw / 100000.0);
             }
         }
 
@@ -126,22 +129,23 @@ namespace Libs
             if (rawProfileInfo.rawProfiles.Count < profileCount)
                 throw new ArgumentException("rawProfiles must contain at least one raw profile index per profilesData entry.");
 
-            // Flatten only ProfileData.ProfData. Ignore luminance.
+            // Flatten only profile height data, ignore luminance.
             int totalRawCount = 0;
 
-            for (int i = 0; i < profileCount; i++)
+            for (int p = 0; p < profileCount; p++)
             {
-                var profileData = rawProfileInfo.profilesData[i];
+                var profileData = rawProfileInfo.profilesData[p];
 
                 int count = profileData.ProfInfo.nProfileDataCount;
+
                 if (count < 0)
-                    throw new InvalidOperationException($"Profile {i} has negative nProfileDataCount.");
+                    throw new InvalidOperationException($"Profile {p} has negative nProfileDataCount.");
 
                 if (profileData.ProfData == null)
-                    throw new InvalidOperationException($"Profile {i} ProfData is null.");
+                    throw new InvalidOperationException($"Profile {p} ProfData is null.");
 
                 if (profileData.ProfData.Length < count)
-                    throw new InvalidOperationException($"Profile {i} ProfData length is smaller than nProfileDataCount.");
+                    throw new InvalidOperationException($"Profile {p} ProfData length is smaller than nProfileDataCount.");
 
                 totalRawCount += count;
             }
@@ -154,26 +158,30 @@ namespace Libs
             }
 
             var rawZ = new int[totalRawCount];
+            var profileIndexPerPoint = new int[totalRawCount];
             var profileInfos = new RawProfileInfoGpu[profileCount];
 
             int offset = 0;
 
-            for (int i = 0; i < profileCount; i++)
+            for (int p = 0; p < profileCount; p++)
             {
-                var profileData = rawProfileInfo.profilesData[i];
+                var profileData = rawProfileInfo.profilesData[p];
 
                 int count = profileData.ProfInfo.nProfileDataCount;
                 double xPitch = ((double)profileData.ProfInfo.LXPitch) / 1e5;
 
                 Array.Copy(profileData.ProfData, 0, rawZ, offset, count);
 
-                profileInfos[i] = new RawProfileInfoGpu
+                profileInfos[p] = new RawProfileInfoGpu
                 {
-                    RawProfile = rawProfileInfo.rawProfiles[i],
+                    RawProfile = rawProfileInfo.rawProfiles[p],
                     DataStart = offset,
                     Count = count,
                     XPitch = xPitch
                 };
+
+                for (int i = 0; i < count; i++)
+                    profileIndexPerPoint[offset + i] = p;
 
                 offset += count;
             }
@@ -200,6 +208,7 @@ namespace Libs
 
             // CPU -> GPU copies.
             using var dRawZ = _acc.Allocate1D(rawZ);
+            using var dProfileIndexPerPoint = _acc.Allocate1D(profileIndexPerPoint);
             using var dProfileInfos = _acc.Allocate1D(profileInfos);
             using var dCounts = _acc.Allocate1D(new int[2]);
 
@@ -211,10 +220,11 @@ namespace Libs
                     ? new ScanPointXYZ[1]
                     : existingCpu);
 
-            // Raw profile data -> valid/null point arrays.
+            // One GPU thread per raw point.
             _rawProfileToPointsKernel(
-                profileCount,
+                totalRawCount,
                 dRawZ.View,
+                dProfileIndexPerPoint.View,
                 dProfileInfos.View,
                 dValidRaw.View,
                 dNullRaw.View,
@@ -230,9 +240,7 @@ namespace Libs
 
             if (validCount == 0)
             {
-                var nullOnlyGpu = dNullRaw.GetAsArray1D();
-
-                var nullOnly = nullOnlyGpu
+                var nullOnly = dNullRaw.GetAsArray1D()
                     .Take(nullCount)
                     .Select(n => (n.Point, n.Reason))
                     .ToList();
@@ -243,7 +251,6 @@ namespace Libs
             }
 
             using var dEmpty = _acc.Allocate1D<ScanPointXYZ>(1);
-
             using var dValidCompact = _acc.Allocate1D<ScanPointXYZ>(validCount);
             using var dValidFinal = _acc.Allocate1D<ScanPointXYZ>(validCount);
             using var dFinal = _acc.Allocate1D<ScanPointXYZ>(existingCount + validCount);
@@ -257,7 +264,7 @@ namespace Libs
 
             _acc.Synchronize();
 
-            // Transform current cloud if requested.
+            // Transform current valid points if requested.
             if (doTransform)
             {
                 _transformkernel(
@@ -303,14 +310,12 @@ namespace Libs
 
             _acc.Synchronize();
 
-            // GPU -> CPU copies at the end.
+            // GPU -> CPU copies.
             ScanPointXYZ[] finalPoints = dFinal.GetAsArray1D()
                 .Take(finalCount)
                 .ToArray();
 
-            NullPointGpu[] nullGpu = dNullRaw.GetAsArray1D();
-
-            var nullPoints = nullGpu
+            var nullPoints = dNullRaw.GetAsArray1D()
                 .Take(nullCount)
                 .Select(n => (n.Point, n.Reason))
                 .ToList();
