@@ -1,184 +1,185 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using ILGPU;
-using ILGPU.Runtime;
+private static readonly Action<
+    Index1D,
+    ArrayView<ScanPointXYZ>,
+    ArrayView<double>,
+    ArrayView<double>,
+    int> _reduceMinMaxYKernel =
+        _acc.LoadAutoGroupedStreamKernel<
+            Index1D,
+            ArrayView<ScanPointXYZ>,
+            ArrayView<double>,
+            ArrayView<double>,
+            int>(ReduceMinMaxYKernel);
 
-public partial class PCP
+private static readonly Action<
+    Index1D,
+    ArrayView<ScanPointXYZ>,
+    double> _invertYKernel =
+        _acc.LoadAutoGroupedStreamKernel<
+            Index1D,
+            ArrayView<ScanPointXYZ>,
+            double>(InvertYKernel);
+
+private static readonly Action<
+    Index1D,
+    ArrayView<NullPointGpu>,
+    double> _invertNullYKernel =
+        _acc.LoadAutoGroupedStreamKernel<
+            Index1D,
+            ArrayView<NullPointGpu>,
+            double>(InvertNullYKernel);
+
+
+private static void ReduceMinMaxYKernel(
+    Index1D blockIndex,
+    ArrayView<ScanPointXYZ> points,
+    ArrayView<double> blockMinY,
+    ArrayView<double> blockMaxY,
+    int validCount)
 {
-    public struct RawProfileInfoGpu
+    int blockSize = 1024;
+    int start = blockIndex * blockSize;
+    int end = XMath.Min(start + blockSize, validCount);
+
+    double minY = double.PositiveInfinity;
+    double maxY = double.NegativeInfinity;
+
+    for (int i = start; i < end; i++)
     {
-        public int RawProfile;
-        public int DataStart;
-        public int Count;
-        public double XPitch;
+        double y = points[i].Y;
+
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
     }
 
-    public struct NullPointGpu
+    blockMinY[blockIndex] = minY;
+    blockMaxY[blockIndex] = maxY;
+}
+
+private static void InvertYKernel(
+    Index1D i,
+    ArrayView<ScanPointXYZ> points,
+    double centerY)
+{
+    if (i >= points.Length)
+        return;
+
+    var p = points[i];
+    p.Y = 2.0 * centerY - p.Y;
+    points[i] = p;
+}
+
+private static void InvertNullYKernel(
+    Index1D i,
+    ArrayView<NullPointGpu> nullPoints,
+    double centerY)
+{
+    if (i >= nullPoints.Length)
+        return;
+
+    var n = nullPoints[i];
+    var p = n.Point;
+
+    p.Y = 2.0 * centerY - p.Y;
+
+    n.Point = p;
+    nullPoints[i] = n;
+}
+
+
+private static double GetCenterYOnGpu(
+    MemoryBuffer1D<ScanPointXYZ, Stride1D.Dense> dPoints,
+    int validCount)
+{
+    if (validCount <= 0)
+        return 0.0;
+
+    const int blockSize = 1024;
+    int blockCount = (validCount + blockSize - 1) / blockSize;
+
+    using var dBlockMin = _acc.Allocate1D<double>(blockCount);
+    using var dBlockMax = _acc.Allocate1D<double>(blockCount);
+
+    _reduceMinMaxYKernel(
+        blockCount,
+        dPoints.View,
+        dBlockMin.View,
+        dBlockMax.View,
+        validCount);
+
+    _acc.Synchronize();
+
+    // Tiny GPU -> CPU copy: blockCount doubles, not the whole cloud.
+    double[] minYs = dBlockMin.GetAsArray1D();
+    double[] maxYs = dBlockMax.GetAsArray1D();
+
+    double minY = double.PositiveInfinity;
+    double maxY = double.NegativeInfinity;
+
+    for (int i = 0; i < blockCount; i++)
     {
-        public ScanPointXYZ Point;
-        public nullTypes Reason;
+        if (minYs[i] < minY) minY = minYs[i];
+        if (maxYs[i] > maxY) maxY = maxYs[i];
     }
 
-    public struct BuildCloudGpuResult
-    {
-        public PointCloud Cloud;
-        public List<(ScanPointXYZ Point, nullTypes reason)> NullPoints;
+    return 0.5 * (minY + maxY);
+}
 
-        public BuildCloudGpuResult(
-            PointCloud cloud,
-            List<(ScanPointXYZ Point, nullTypes reason)> nullPoints)
-        {
-            Cloud = cloud;
-            NullPoints = nullPoints;
-        }
+
+
+public static BuildCloudGpuResult ConstructJoinedCloud_GPU(
+    RawProfileInfo leftRaw,
+    RawProfileInfo rightRaw,
+    double yInterval,
+    RigidT rightToLeftTransform,
+    bool invertRequired)
+{
+    var left = FlattenRawProfileInfo(leftRaw, nameof(leftRaw));
+    var right = FlattenRawProfileInfo(rightRaw, nameof(rightRaw));
+
+    int maxValidCount = left.TotalRawCount + right.TotalRawCount;
+    int maxNullCount = left.TotalRawCount + right.TotalRawCount;
+
+    if (maxValidCount == 0)
+    {
+        return new BuildCloudGpuResult(
+            new PointCloud(Array.Empty<ScanPointXYZ>()),
+            new List<(ScanPointXYZ Point, nullTypes reason)>());
     }
 
-    private struct FlatRawGpuInput
+    RigidT rt = rightToLeftTransform;
+
+    // Adjust right scanner transform if backward/inverted scan requires it.
+    if (invertRequired)
+        rt.ty = -rt.ty;
+
+    RigidT identity = new RigidT
     {
-        public int[] RawZ;
-        public int[] ProfileIndexPerPoint;
-        public RawProfileInfoGpu[] ProfileInfos;
-        public int TotalRawCount;
-    }
+        r00 = 1, r01 = 0, r02 = 0,
+        r10 = 0, r11 = 1, r12 = 0,
+        r20 = 0, r21 = 0, r22 = 1,
+        tx = 0, ty = 0, tz = 0,
+        s = 1
+    };
 
-    private static readonly Action<
-        Index1D,
-        ArrayView<int>,
-        ArrayView<int>,
-        ArrayView<RawProfileInfoGpu>,
-        ArrayView<ScanPointXYZ>,
-        ArrayView<NullPointGpu>,
-        ArrayView<int>,
-        double,
-        RigidT,
-        int> _rawToJoinedKernel =
-            _acc.LoadAutoGroupedStreamKernel<
-                Index1D,
-                ArrayView<int>,
-                ArrayView<int>,
-                ArrayView<RawProfileInfoGpu>,
-                ArrayView<ScanPointXYZ>,
-                ArrayView<NullPointGpu>,
-                ArrayView<int>,
-                double,
-                RigidT,
-                int>(RawToJoinedKernel);
+    // CPU -> GPU uploads.
+    using var dLeftRawZ = _acc.Allocate1D(left.RawZ.Length == 0 ? new int[1] : left.RawZ);
+    using var dLeftProfileIndex = _acc.Allocate1D(left.ProfileIndexPerPoint.Length == 0 ? new int[1] : left.ProfileIndexPerPoint);
+    using var dLeftProfileInfos = _acc.Allocate1D(left.ProfileInfos.Length == 0 ? new RawProfileInfoGpu[1] : left.ProfileInfos);
 
-    private static void RawToJoinedKernel(
-        Index1D rawIndex,
-        ArrayView<int> rawZ,
-        ArrayView<int> profileIndexPerPoint,
-        ArrayView<RawProfileInfoGpu> profileInfos,
-        ArrayView<ScanPointXYZ> joinedValidPoints,
-        ArrayView<NullPointGpu> nullPoints,
-        ArrayView<int> counts,
-        double yInterval,
-        RigidT rt,
-        int applyTransform)
+    using var dRightRawZ = _acc.Allocate1D(right.RawZ.Length == 0 ? new int[1] : right.RawZ);
+    using var dRightProfileIndex = _acc.Allocate1D(right.ProfileIndexPerPoint.Length == 0 ? new int[1] : right.ProfileIndexPerPoint);
+    using var dRightProfileInfos = _acc.Allocate1D(right.ProfileInfos.Length == 0 ? new RawProfileInfoGpu[1] : right.ProfileInfos);
+
+    using var dJoined = _acc.Allocate1D<ScanPointXYZ>(Math.Max(1, maxValidCount));
+    using var dNulls = _acc.Allocate1D<NullPointGpu>(Math.Max(1, maxNullCount));
+
+    // counts[0] = valid joined count, counts[1] = null count
+    using var dCounts = _acc.Allocate1D(new int[2]);
+
+    // Left raw -> joined cloud, no transform.
+    if (left.TotalRawCount > 0)
     {
-        int i = rawIndex;
-        if (i >= rawZ.Length)
-            return;
-
-        int profileIndex = profileIndexPerPoint[i];
-        var info = profileInfos[profileIndex];
-
-        int localIndex = i - info.DataStart;
-        int raw = rawZ[i];
-
-        double x = localIndex * info.XPitch;
-        double y = info.RawProfile * yInterval;
-        double z = 0.0;
-
-        bool isNull =
-            raw == (int)nullTypes.Invalid1 ||
-            raw == (int)nullTypes.Invalid2 ||
-            raw == (int)nullTypes.Deadzone ||
-            raw == (int)nullTypes.JudgmentStandby;
-
-        if (!isNull)
-            z = raw / 100000.0;
-
-        var p = new ScanPointXYZ(x, y, z);
-
-        if (applyTransform == 1)
-        {
-            double px = p.X;
-            double py = p.Y;
-            double pz = p.Z;
-            double s = rt.s;
-
-            p = new ScanPointXYZ(
-                s * (rt.r00 * px + rt.r01 * py + rt.r02 * pz) + rt.tx,
-                s * (rt.r10 * px + rt.r11 * py + rt.r12 * pz) + rt.ty,
-                s * (rt.r20 * px + rt.r21 * py + rt.r22 * pz) + rt.tz);
-        }
-
-        if (isNull)
-        {
-            int nullIdx = Atomic.Add(ref counts[1], 1);
-
-            nullPoints[nullIdx] = new NullPointGpu
-            {
-                Point = p,
-                Reason = (nullTypes)raw
-            };
-        }
-        else
-        {
-            int validIdx = Atomic.Add(ref counts[0], 1);
-            joinedValidPoints[validIdx] = p;
-        }
-    }
-
-    public static BuildCloudGpuResult ConstructJoinedCloud_GPU(
-        RawProfileInfo leftRaw,
-        RawProfileInfo rightRaw,
-        double yInterval,
-        RigidT rightToLeftTransform,
-        bool invertRequired)
-    {
-        var left = FlattenRawProfileInfo(leftRaw, nameof(leftRaw));
-        var right = FlattenRawProfileInfo(rightRaw, nameof(rightRaw));
-
-        int maxValidCount = left.TotalRawCount + right.TotalRawCount;
-        int maxNullCount = left.TotalRawCount + right.TotalRawCount;
-
-        RigidT rt = rightToLeftTransform;
-
-        if (invertRequired)
-        {
-            // Invert Y translation before transforming right scanner cloud.
-            rt.ty = -rt.ty;
-        }
-
-        // CPU -> GPU copies happen here.
-        using var dLeftRawZ = _acc.Allocate1D(left.RawZ);
-        using var dLeftProfileIndex = _acc.Allocate1D(left.ProfileIndexPerPoint);
-        using var dLeftProfileInfos = _acc.Allocate1D(left.ProfileInfos);
-
-        using var dRightRawZ = _acc.Allocate1D(right.RawZ);
-        using var dRightProfileIndex = _acc.Allocate1D(right.ProfileIndexPerPoint);
-        using var dRightProfileInfos = _acc.Allocate1D(right.ProfileInfos);
-
-        using var dJoined = _acc.Allocate1D<ScanPointXYZ>(Math.Max(1, maxValidCount));
-        using var dNulls = _acc.Allocate1D<NullPointGpu>(Math.Max(1, maxNullCount));
-
-        // counts[0] = valid joined point count
-        // counts[1] = null point count
-        using var dCounts = _acc.Allocate1D(new int[2]);
-
-        RigidT identity = new RigidT
-        {
-            r00 = 1, r01 = 0, r02 = 0,
-            r10 = 0, r11 = 1, r12 = 0,
-            r20 = 0, r21 = 0, r22 = 1,
-            tx = 0, ty = 0, tz = 0,
-            s = 1
-        };
-
-        // Left raw -> joined valid points.
         _rawToJoinedKernel(
             left.TotalRawCount,
             dLeftRawZ.View,
@@ -190,8 +191,11 @@ public partial class PCP
             yInterval,
             identity,
             0);
+    }
 
-        // Right raw -> transform -> append to joined valid points.
+    // Right raw -> transform -> append into joined cloud.
+    if (right.TotalRawCount > 0)
+    {
         _rawToJoinedKernel(
             right.TotalRawCount,
             dRightRawZ.View,
@@ -203,125 +207,47 @@ public partial class PCP
             yInterval,
             rt,
             1);
+    }
+
+    _acc.Synchronize();
+
+    // Small final count readback.
+    int[] counts = dCounts.GetAsArray1D();
+    int validCount = counts[0];
+    int nullCount = counts[1];
+
+    // GPU-side center inversion after both clouds are joined.
+    if (invertRequired && validCount > 0)
+    {
+        double centerY = GetCenterYOnGpu(dJoined, validCount);
+
+        _invertYKernel(
+            validCount,
+            dJoined.View.SubView(0, validCount),
+            centerY);
+
+        if (nullCount > 0)
+        {
+            _invertNullYKernel(
+                nullCount,
+                dNulls.View.SubView(0, nullCount),
+                centerY);
+        }
 
         _acc.Synchronize();
-
-        // GPU -> CPU copies happen here at the end.
-        int[] counts = dCounts.GetAsArray1D();
-        int validCount = counts[0];
-        int nullCount = counts[1];
-
-        ScanPointXYZ[] joinedPoints = dJoined.GetAsArray1D()
-            .Take(validCount)
-            .ToArray();
-
-        var nullPoints = dNulls.GetAsArray1D()
-            .Take(nullCount)
-            .Select(n => (n.Point, n.Reason))
-            .ToList();
-
-        var joinedCloud = new PointCloud(joinedPoints);
-
-        if (invertRequired && joinedCloud.Points.Count > 0)
-        {
-            double centerY =
-                (joinedCloud.Points.Min(p => p.Y) + joinedCloud.Points.Max(p => p.Y)) * 0.5;
-
-            joinedCloud.InvertAroundCenterInPlace(Axis.Y);
-
-            // Keep null points spatially consistent with the joined cloud inversion.
-            nullPoints = nullPoints
-                .Select(n =>
-                {
-                    var p = n.Point;
-                    var inv = new ScanPointXYZ(p.X, 2.0 * centerY - p.Y, p.Z);
-                    return (inv, n.Reason);
-                })
-                .ToList();
-        }
-
-        return new BuildCloudGpuResult(joinedCloud, nullPoints);
     }
 
-    private static FlatRawGpuInput FlattenRawProfileInfo(RawProfileInfo rawInfo, string name)
-    {
-        if (rawInfo.rawProfiles == null)
-            throw new ArgumentNullException($"{name}.{nameof(rawInfo.rawProfiles)}");
+    // GPU -> CPU final downloads.
+    ScanPointXYZ[] joinedPoints = dJoined.GetAsArray1D()
+        .Take(validCount)
+        .ToArray();
 
-        if (rawInfo.profilesData == null)
-            throw new ArgumentNullException($"{name}.{nameof(rawInfo.profilesData)}");
+    var nullPoints = dNulls.GetAsArray1D()
+        .Take(nullCount)
+        .Select(n => (n.Point, n.Reason))
+        .ToList();
 
-        int profileCount = rawInfo.profilesData.Count;
-
-        if (profileCount == 0)
-        {
-            return new FlatRawGpuInput
-            {
-                RawZ = Array.Empty<int>(),
-                ProfileIndexPerPoint = Array.Empty<int>(),
-                ProfileInfos = Array.Empty<RawProfileInfoGpu>(),
-                TotalRawCount = 0
-            };
-        }
-
-        if (rawInfo.rawProfiles.Count < profileCount)
-            throw new ArgumentException($"{name}.rawProfiles must contain at least one index per profilesData entry.");
-
-        int totalRawCount = 0;
-
-        for (int p = 0; p < profileCount; p++)
-        {
-            var pd = rawInfo.profilesData[p];
-            int count = pd.ProfInfo.nProfileDataCount;
-
-            if (count < 0)
-                throw new InvalidOperationException($"{name} profile {p} has negative nProfileDataCount.");
-
-            if (pd.ProfData == null)
-                throw new InvalidOperationException($"{name} profile {p} ProfData is null.");
-
-            if (pd.ProfData.Length < count)
-                throw new InvalidOperationException($"{name} profile {p} ProfData length is smaller than nProfileDataCount.");
-
-            totalRawCount += count;
-        }
-
-        var rawZ = new int[totalRawCount];
-        var profileIndexPerPoint = new int[totalRawCount];
-        var profileInfos = new RawProfileInfoGpu[profileCount];
-
-        int offset = 0;
-
-        for (int p = 0; p < profileCount; p++)
-        {
-            var pd = rawInfo.profilesData[p];
-
-            int count = pd.ProfInfo.nProfileDataCount;
-            double xPitch = ((double)pd.ProfInfo.LXPitch) / 100000.0;
-
-            // Copy only height/profile data. Ignore luminance.
-            Array.Copy(pd.ProfData, 0, rawZ, offset, count);
-
-            profileInfos[p] = new RawProfileInfoGpu
-            {
-                RawProfile = rawInfo.rawProfiles[p],
-                DataStart = offset,
-                Count = count,
-                XPitch = xPitch
-            };
-
-            for (int i = 0; i < count; i++)
-                profileIndexPerPoint[offset + i] = p;
-
-            offset += count;
-        }
-
-        return new FlatRawGpuInput
-        {
-            RawZ = rawZ,
-            ProfileIndexPerPoint = profileIndexPerPoint,
-            ProfileInfos = profileInfos,
-            TotalRawCount = totalRawCount
-        };
-    }
+    return new BuildCloudGpuResult(
+        new PointCloud(joinedPoints),
+        nullPoints);
 }
