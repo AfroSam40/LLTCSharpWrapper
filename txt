@@ -1,132 +1,3 @@
-private static readonly Action<
-    Index1D,
-    ArrayView<ScanPointXYZ>,
-    ArrayView<double>,
-    ArrayView<double>,
-    int> _reduceMinMaxYKernel =
-        _acc.LoadAutoGroupedStreamKernel<
-            Index1D,
-            ArrayView<ScanPointXYZ>,
-            ArrayView<double>,
-            ArrayView<double>,
-            int>(ReduceMinMaxYKernel);
-
-private static readonly Action<
-    Index1D,
-    ArrayView<ScanPointXYZ>,
-    double> _invertYKernel =
-        _acc.LoadAutoGroupedStreamKernel<
-            Index1D,
-            ArrayView<ScanPointXYZ>,
-            double>(InvertYKernel);
-
-private static readonly Action<
-    Index1D,
-    ArrayView<NullPointGpu>,
-    double> _invertNullYKernel =
-        _acc.LoadAutoGroupedStreamKernel<
-            Index1D,
-            ArrayView<NullPointGpu>,
-            double>(InvertNullYKernel);
-
-
-private static void ReduceMinMaxYKernel(
-    Index1D blockIndex,
-    ArrayView<ScanPointXYZ> points,
-    ArrayView<double> blockMinY,
-    ArrayView<double> blockMaxY,
-    int validCount)
-{
-    int blockSize = 1024;
-    int start = blockIndex * blockSize;
-    int end = XMath.Min(start + blockSize, validCount);
-
-    double minY = double.PositiveInfinity;
-    double maxY = double.NegativeInfinity;
-
-    for (int i = start; i < end; i++)
-    {
-        double y = points[i].Y;
-
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-    }
-
-    blockMinY[blockIndex] = minY;
-    blockMaxY[blockIndex] = maxY;
-}
-
-private static void InvertYKernel(
-    Index1D i,
-    ArrayView<ScanPointXYZ> points,
-    double centerY)
-{
-    if (i >= points.Length)
-        return;
-
-    var p = points[i];
-    p.Y = 2.0 * centerY - p.Y;
-    points[i] = p;
-}
-
-private static void InvertNullYKernel(
-    Index1D i,
-    ArrayView<NullPointGpu> nullPoints,
-    double centerY)
-{
-    if (i >= nullPoints.Length)
-        return;
-
-    var n = nullPoints[i];
-    var p = n.Point;
-
-    p.Y = 2.0 * centerY - p.Y;
-
-    n.Point = p;
-    nullPoints[i] = n;
-}
-
-
-private static double GetCenterYOnGpu(
-    MemoryBuffer1D<ScanPointXYZ, Stride1D.Dense> dPoints,
-    int validCount)
-{
-    if (validCount <= 0)
-        return 0.0;
-
-    const int blockSize = 1024;
-    int blockCount = (validCount + blockSize - 1) / blockSize;
-
-    using var dBlockMin = _acc.Allocate1D<double>(blockCount);
-    using var dBlockMax = _acc.Allocate1D<double>(blockCount);
-
-    _reduceMinMaxYKernel(
-        blockCount,
-        dPoints.View,
-        dBlockMin.View,
-        dBlockMax.View,
-        validCount);
-
-    _acc.Synchronize();
-
-    // Tiny GPU -> CPU copy: blockCount doubles, not the whole cloud.
-    double[] minYs = dBlockMin.GetAsArray1D();
-    double[] maxYs = dBlockMax.GetAsArray1D();
-
-    double minY = double.PositiveInfinity;
-    double maxY = double.NegativeInfinity;
-
-    for (int i = 0; i < blockCount; i++)
-    {
-        if (minYs[i] < minY) minY = minYs[i];
-        if (maxYs[i] > maxY) maxY = maxYs[i];
-    }
-
-    return 0.5 * (minY + maxY);
-}
-
-
-
 public static BuildCloudGpuResult ConstructJoinedCloud_GPU(
     RawProfileInfo leftRaw,
     RawProfileInfo rightRaw,
@@ -149,7 +20,7 @@ public static BuildCloudGpuResult ConstructJoinedCloud_GPU(
 
     RigidT rt = rightToLeftTransform;
 
-    // Adjust right scanner transform if backward/inverted scan requires it.
+    // Adjust right transform for inverted scan.
     if (invertRequired)
         rt.ty = -rt.ty;
 
@@ -211,12 +82,12 @@ public static BuildCloudGpuResult ConstructJoinedCloud_GPU(
 
     _acc.Synchronize();
 
-    // Small final count readback.
+    // Small count readback.
     int[] counts = dCounts.GetAsArray1D();
     int validCount = counts[0];
     int nullCount = counts[1];
 
-    // GPU-side center inversion after both clouds are joined.
+    // Invert only valid joined cloud. Do not process null points.
     if (invertRequired && validCount > 0)
     {
         double centerY = GetCenterYOnGpu(dJoined, validCount);
@@ -225,14 +96,6 @@ public static BuildCloudGpuResult ConstructJoinedCloud_GPU(
             validCount,
             dJoined.View.SubView(0, validCount),
             centerY);
-
-        if (nullCount > 0)
-        {
-            _invertNullYKernel(
-                nullCount,
-                dNulls.View.SubView(0, nullCount),
-                centerY);
-        }
 
         _acc.Synchronize();
     }
