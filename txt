@@ -4,325 +4,290 @@ using System.Linq;
 using ILGPU;
 using ILGPU.Runtime;
 
-namespace Libs
+public partial class PCP
 {
-    public partial class PCP
+    public struct RawProfileInfoGpu
     {
-        public struct RawProfileInfoGpu
+        public int RawProfile;
+        public int DataStart;
+        public int Count;
+        public double XPitch;
+    }
+
+    public struct NullPointGpu
+    {
+        public ScanPointXYZ Point;
+        public nullTypes Reason;
+    }
+
+    public struct BuildCloudGpuResult
+    {
+        public PointCloud Cloud;
+        public List<(ScanPointXYZ Point, nullTypes reason)> NullPoints;
+
+        public BuildCloudGpuResult(PointCloud cloud, List<(ScanPointXYZ Point, nullTypes reason)> nullPoints)
         {
-            public int RawProfile;
-            public int DataStart;
-            public int Count;
-            public double XPitch;
+            Cloud = cloud;
+            NullPoints = nullPoints;
+        }
+    }
+
+    private static readonly Action<
+        Index1D,
+        ArrayView<int>,
+        ArrayView<int>,
+        ArrayView<RawProfileInfoGpu>,
+        ArrayView<ScanPointXYZ>,
+        ArrayView<NullPointGpu>,
+        ArrayView<int>,
+        double> _rawProfileToPointsKernel =
+            _acc.LoadAutoGroupedStreamKernel<
+                Index1D,
+                ArrayView<int>,
+                ArrayView<int>,
+                ArrayView<RawProfileInfoGpu>,
+                ArrayView<ScanPointXYZ>,
+                ArrayView<NullPointGpu>,
+                ArrayView<int>,
+                double>(RawProfileToPointsKernel);
+
+    private static void RawProfileToPointsKernel(
+        Index1D rawIndex,
+        ArrayView<int> rawZ,
+        ArrayView<int> profileIndexPerPoint,
+        ArrayView<RawProfileInfoGpu> profiles,
+        ArrayView<ScanPointXYZ> validPoints,
+        ArrayView<NullPointGpu> nullPoints,
+        ArrayView<int> counts,
+        double yInterval)
+    {
+        int i = rawIndex;
+        if (i >= rawZ.Length) return;
+
+        int profileIndex = profileIndexPerPoint[i];
+        var info = profiles[profileIndex];
+
+        int localIndex = i - info.DataStart;
+        int raw = rawZ[i];
+
+        double x = localIndex * info.XPitch;
+        double y = info.RawProfile * yInterval;
+
+        bool isNull =
+            raw == (int)nullTypes.Invalid1 ||
+            raw == (int)nullTypes.Invalid2 ||
+            raw == (int)nullTypes.DeadZone ||
+            raw == (int)nullTypes.JudgmentStandby;
+
+        if (isNull)
+        {
+            int idx = Atomic.Add(ref counts[1], 1);
+
+            nullPoints[idx] = new NullPointGpu
+            {
+                Point = new ScanPointXYZ(x, y, 0.0),
+                Reason = (nullTypes)raw
+            };
+        }
+        else
+        {
+            int idx = Atomic.Add(ref counts[0], 1);
+            validPoints[idx] = new ScanPointXYZ(x, y, raw / 100000.0);
+        }
+    }
+
+    public static BuildCloudGpuResult ConstructCloud_GPU(
+        RawProfileInfo rawProfileInfo,
+        double yInterval,
+        RigidT? stitchTransform = null,
+        PointCloud stitchToCloud = null)
+    {
+        if (rawProfileInfo.rawProfiles == null)
+            throw new ArgumentNullException(nameof(rawProfileInfo.rawProfiles));
+
+        if (rawProfileInfo.profilesData == null)
+            throw new ArgumentNullException(nameof(rawProfileInfo.profilesData));
+
+        int profileCount = rawProfileInfo.profilesData.Count;
+
+        if (profileCount == 0)
+            return new BuildCloudGpuResult(
+                new PointCloud(Array.Empty<ScanPointXYZ>()),
+                new List<(ScanPointXYZ Point, nullTypes reason)>());
+
+        if (rawProfileInfo.rawProfiles.Count < profileCount)
+            throw new ArgumentException("rawProfiles must contain at least one index per profilesData entry.");
+
+        // Flatten profile data only
+        int totalRawCount = 0;
+
+        for (int p = 0; p < profileCount; p++)
+        {
+            var pd = rawProfileInfo.profilesData[p];
+            int count = pd.ProfInfo.nProfileDataCount;
+
+            if (count < 0)
+                throw new InvalidOperationException($"Profile {p} has negative nProfileDataCount.");
+
+            if (pd.ProfData == null)
+                throw new InvalidOperationException($"Profile {p} ProfData is null.");
+
+            if (pd.ProfData.Length < count)
+                throw new InvalidOperationException($"Profile {p} ProfData length is smaller than nProfileDataCount.");
+
+            totalRawCount += count;
         }
 
-        public struct NullPointGpu
+        if (totalRawCount == 0)
+            return new BuildCloudGpuResult(
+                stitchToCloud ?? new PointCloud(Array.Empty<ScanPointXYZ>()),
+                new List<(ScanPointXYZ Point, nullTypes reason)>());
+
+        var rawZ = new int[totalRawCount];
+        var profileIndexPerPoint = new int[totalRawCount];
+        var profileInfos = new RawProfileInfoGpu[profileCount];
+
+        int offset = 0;
+
+        for (int p = 0; p < profileCount; p++)
         {
-            public ScanPointXYZ Point;
-            public nullTypes Reason;
+            var pd = rawProfileInfo.profilesData[p];
+
+            int count = pd.ProfInfo.nProfileDataCount;
+            double xPitch = ((double)pd.ProfInfo.LXPitch) / 100000.0;
+
+            Array.Copy(pd.ProfData, 0, rawZ, offset, count);
+
+            profileInfos[p] = new RawProfileInfoGpu
+            {
+                RawProfile = rawProfileInfo.rawProfiles[p],
+                DataStart = offset,
+                Count = count,
+                XPitch = xPitch
+            };
+
+            for (int i = 0; i < count; i++)
+                profileIndexPerPoint[offset + i] = p;
+
+            offset += count;
         }
 
-        public struct BuildCloudGpuResult
+        var existingCpu =
+            stitchToCloud?.Points != null && stitchToCloud.Points.Count > 0
+                ? stitchToCloud.Points.ToArray()
+                : Array.Empty<ScanPointXYZ>();
+
+        int existingCount = existingCpu.Length;
+        bool doTransform = stitchTransform.HasValue;
+        bool doStitch = existingCount > 0;
+
+        RigidT rt = doTransform
+            ? stitchTransform.Value
+            : new RigidT
+            {
+                r00 = 1, r01 = 0, r02 = 0,
+                r10 = 0, r11 = 1, r12 = 0,
+                r20 = 0, r21 = 0, r22 = 1,
+                tx = 0, ty = 0, tz = 0,
+                s = 1
+            };
+
+        // CPU -> GPU
+        using var dRawZ = _acc.Allocate1D(rawZ);
+        using var dProfileIndexPerPoint = _acc.Allocate1D(profileIndexPerPoint);
+        using var dProfileInfos = _acc.Allocate1D(profileInfos);
+        using var dCounts = _acc.Allocate1D(new int[2]);
+
+        using var dValidRaw = _acc.Allocate1D<ScanPointXYZ>(Math.Max(1, totalRawCount));
+        using var dNullRaw = _acc.Allocate1D<NullPointGpu>(Math.Max(1, totalRawCount));
+
+        using var dExisting = _acc.Allocate1D(
+            existingCount == 0 ? new ScanPointXYZ[1] : existingCpu);
+
+        // Raw scanner data -> valid/null points
+        _rawProfileToPointsKernel(
+            totalRawCount,
+            dRawZ.View,
+            dProfileIndexPerPoint.View,
+            dProfileInfos.View,
+            dValidRaw.View,
+            dNullRaw.View,
+            dCounts.View,
+            yInterval);
+
+        _acc.Synchronize();
+
+        // Required because your existing transform/concat kernels need exact lengths
+        int[] counts = dCounts.GetAsArray1D();
+        int validCount = counts[0];
+        int nullCount = counts[1];
+
+        if (validCount == 0)
         {
-            public PointCloud Cloud;
-            public List<(ScanPointXYZ Point, nullTypes reason)> NullPoints;
-
-            public BuildCloudGpuResult(
-                PointCloud cloud,
-                List<(ScanPointXYZ Point, nullTypes reason)> nullPoints)
-            {
-                Cloud = cloud;
-                NullPoints = nullPoints;
-            }
-        }
-
-        private static readonly Action<
-            Index1D,
-            ArrayView<int>,
-            ArrayView<int>,
-            ArrayView<RawProfileInfoGpu>,
-            ArrayView<ScanPointXYZ>,
-            ArrayView<NullPointGpu>,
-            ArrayView<int>,
-            double> _rawProfileToPointsKernel =
-                _acc.LoadAutoGroupedStreamKernel<
-                    Index1D,
-                    ArrayView<int>,
-                    ArrayView<int>,
-                    ArrayView<RawProfileInfoGpu>,
-                    ArrayView<ScanPointXYZ>,
-                    ArrayView<NullPointGpu>,
-                    ArrayView<int>,
-                    double>(RawProfileToPointsKernel);
-
-        private static void RawProfileToPointsKernel(
-            Index1D rawIndex,
-            ArrayView<int> rawZ,
-            ArrayView<int> profileIndexPerPoint,
-            ArrayView<RawProfileInfoGpu> profiles,
-            ArrayView<ScanPointXYZ> validPoints,
-            ArrayView<NullPointGpu> nullPoints,
-            ArrayView<int> counts,
-            double yInterval)
-        {
-            int i = rawIndex;
-            if (i >= rawZ.Length)
-                return;
-
-            int profileIndex = profileIndexPerPoint[i];
-            var info = profiles[profileIndex];
-
-            int localIndex = i - info.DataStart;
-            int raw = rawZ[i];
-
-            double x = localIndex * info.XPitch;
-            double y = info.RawProfile * yInterval;
-
-            bool isNull =
-                raw == (int)nullTypes.Invalid1 ||
-                raw == (int)nullTypes.Invalid2 ||
-                raw == (int)nullTypes.Deadzone ||
-                raw == (int)nullTypes.JudgmentStandby;
-
-            if (isNull)
-            {
-                int idx = Atomic.Add(ref counts[1], 1);
-
-                nullPoints[idx] = new NullPointGpu
-                {
-                    Point = new ScanPointXYZ(x, y, 0.0),
-                    Reason = (nullTypes)raw
-                };
-            }
-            else
-            {
-                int idx = Atomic.Add(ref counts[0], 1);
-
-                validPoints[idx] = new ScanPointXYZ(
-                    x,
-                    y,
-                    raw / 100000.0);
-            }
-        }
-
-        public static BuildCloudGpuResult ConstructCloud_GPU(
-            RawProfileInfo rawProfileInfo,
-            double yInterval,
-            RigidT? stitchTransform = null,
-            PointCloud stitchToCloud = null)
-        {
-            if (rawProfileInfo.rawProfiles == null)
-                throw new ArgumentNullException(nameof(rawProfileInfo.rawProfiles));
-
-            if (rawProfileInfo.profilesData == null)
-                throw new ArgumentNullException(nameof(rawProfileInfo.profilesData));
-
-            int profileCount = rawProfileInfo.profilesData.Count;
-
-            if (profileCount == 0)
-            {
-                return new BuildCloudGpuResult(
-                    new PointCloud(Array.Empty<ScanPointXYZ>()),
-                    new List<(ScanPointXYZ Point, nullTypes reason)>());
-            }
-
-            if (rawProfileInfo.rawProfiles.Count < profileCount)
-                throw new ArgumentException("rawProfiles must contain at least one raw profile index per profilesData entry.");
-
-            // Flatten only profile height data, ignore luminance.
-            int totalRawCount = 0;
-
-            for (int p = 0; p < profileCount; p++)
-            {
-                var profileData = rawProfileInfo.profilesData[p];
-
-                int count = profileData.ProfInfo.nProfileDataCount;
-
-                if (count < 0)
-                    throw new InvalidOperationException($"Profile {p} has negative nProfileDataCount.");
-
-                if (profileData.ProfData == null)
-                    throw new InvalidOperationException($"Profile {p} ProfData is null.");
-
-                if (profileData.ProfData.Length < count)
-                    throw new InvalidOperationException($"Profile {p} ProfData length is smaller than nProfileDataCount.");
-
-                totalRawCount += count;
-            }
-
-            if (totalRawCount == 0)
-            {
-                return new BuildCloudGpuResult(
-                    stitchToCloud ?? new PointCloud(Array.Empty<ScanPointXYZ>()),
-                    new List<(ScanPointXYZ Point, nullTypes reason)>());
-            }
-
-            var rawZ = new int[totalRawCount];
-            var profileIndexPerPoint = new int[totalRawCount];
-            var profileInfos = new RawProfileInfoGpu[profileCount];
-
-            int offset = 0;
-
-            for (int p = 0; p < profileCount; p++)
-            {
-                var profileData = rawProfileInfo.profilesData[p];
-
-                int count = profileData.ProfInfo.nProfileDataCount;
-                double xPitch = ((double)profileData.ProfInfo.LXPitch) / 1e5;
-
-                Array.Copy(profileData.ProfData, 0, rawZ, offset, count);
-
-                profileInfos[p] = new RawProfileInfoGpu
-                {
-                    RawProfile = rawProfileInfo.rawProfiles[p],
-                    DataStart = offset,
-                    Count = count,
-                    XPitch = xPitch
-                };
-
-                for (int i = 0; i < count; i++)
-                    profileIndexPerPoint[offset + i] = p;
-
-                offset += count;
-            }
-
-            ScanPointXYZ[] existingCpu =
-                stitchToCloud?.Points != null && stitchToCloud.Points.Count > 0
-                    ? stitchToCloud.Points.ToArray()
-                    : Array.Empty<ScanPointXYZ>();
-
-            int existingCount = existingCpu.Length;
-            bool doStitch = existingCount > 0;
-            bool doTransform = stitchTransform.HasValue;
-
-            RigidT rt = doTransform
-                ? stitchTransform.Value
-                : new RigidT
-                {
-                    r00 = 1, r01 = 0, r02 = 0,
-                    r10 = 0, r11 = 1, r12 = 0,
-                    r20 = 0, r21 = 0, r22 = 1,
-                    tx = 0, ty = 0, tz = 0,
-                    s = 1
-                };
-
-            // CPU -> GPU copies.
-            using var dRawZ = _acc.Allocate1D(rawZ);
-            using var dProfileIndexPerPoint = _acc.Allocate1D(profileIndexPerPoint);
-            using var dProfileInfos = _acc.Allocate1D(profileInfos);
-            using var dCounts = _acc.Allocate1D(new int[2]);
-
-            using var dValidRaw = _acc.Allocate1D<ScanPointXYZ>(Math.Max(1, totalRawCount));
-            using var dNullRaw = _acc.Allocate1D<NullPointGpu>(Math.Max(1, totalRawCount));
-
-            using var dExisting = _acc.Allocate1D(
-                existingCpu.Length == 0
-                    ? new ScanPointXYZ[1]
-                    : existingCpu);
-
-            // One GPU thread per raw point.
-            _rawProfileToPointsKernel(
-                totalRawCount,
-                dRawZ.View,
-                dProfileIndexPerPoint.View,
-                dProfileInfos.View,
-                dValidRaw.View,
-                dNullRaw.View,
-                dCounts.View,
-                yInterval);
-
-            _acc.Synchronize();
-
-            // Required because existing transform/concat kernels need exact lengths.
-            int[] counts = dCounts.GetAsArray1D();
-            int validCount = counts[0];
-            int nullCount = counts[1];
-
-            if (validCount == 0)
-            {
-                var nullOnly = dNullRaw.GetAsArray1D()
-                    .Take(nullCount)
-                    .Select(n => (n.Point, n.Reason))
-                    .ToList();
-
-                return new BuildCloudGpuResult(
-                    doStitch ? new PointCloud(existingCpu) : new PointCloud(Array.Empty<ScanPointXYZ>()),
-                    nullOnly);
-            }
-
-            using var dEmpty = _acc.Allocate1D<ScanPointXYZ>(1);
-            using var dValidCompact = _acc.Allocate1D<ScanPointXYZ>(validCount);
-            using var dValidFinal = _acc.Allocate1D<ScanPointXYZ>(validCount);
-            using var dFinal = _acc.Allocate1D<ScanPointXYZ>(existingCount + validCount);
-
-            // Copy compacted valid points to exact-size buffer.
-            _concatKernel(
-                validCount,
-                dValidRaw.View.SubView(0, validCount),
-                dEmpty.View.SubView(0, 0),
-                dValidCompact.View);
-
-            _acc.Synchronize();
-
-            // Transform current valid points if requested.
-            if (doTransform)
-            {
-                _transformkernel(
-                    validCount,
-                    dValidCompact.View,
-                    dValidFinal.View,
-                    rt);
-            }
-            else
-            {
-                _concatKernel(
-                    validCount,
-                    dValidCompact.View,
-                    dEmpty.View.SubView(0, 0),
-                    dValidFinal.View);
-            }
-
-            _acc.Synchronize();
-
-            int finalCount;
-
-            // Stitch existing cloud + current cloud.
-            if (doStitch)
-            {
-                finalCount = existingCount + validCount;
-
-                _concatKernel(
-                    finalCount,
-                    dExisting.View.SubView(0, existingCount),
-                    dValidFinal.View,
-                    dFinal.View);
-            }
-            else
-            {
-                finalCount = validCount;
-
-                _concatKernel(
-                    finalCount,
-                    dValidFinal.View,
-                    dEmpty.View.SubView(0, 0),
-                    dFinal.View);
-            }
-
-            _acc.Synchronize();
-
-            // GPU -> CPU copies.
-            ScanPointXYZ[] finalPoints = dFinal.GetAsArray1D()
-                .Take(finalCount)
-                .ToArray();
-
-            var nullPoints = dNullRaw.GetAsArray1D()
+            var nullOnly = dNullRaw.GetAsArray1D()
                 .Take(nullCount)
                 .Select(n => (n.Point, n.Reason))
                 .ToList();
 
             return new BuildCloudGpuResult(
-                new PointCloud(finalPoints),
-                nullPoints);
+                doStitch ? new PointCloud(existingCpu) : new PointCloud(Array.Empty<ScanPointXYZ>()),
+                nullOnly);
+        }
+
+        // Optional transform
+        MemoryBuffer1D<ScanPointXYZ, Stride1D.Dense> dCurrent = null;
+
+        try
+        {
+            if (doTransform)
+            {
+                dCurrent = _acc.Allocate1D<ScanPointXYZ>(validCount);
+
+                _transformkernel(
+                    validCount,
+                    dValidRaw.View.SubView(0, validCount),
+                    dCurrent.View,
+                    rt);
+
+                _acc.Synchronize();
+            }
+
+            // Optional stitch
+            ScanPointXYZ[] finalPoints;
+
+            if (doStitch)
+            {
+                int finalCount = existingCount + validCount;
+                using var dFinal = _acc.Allocate1D<ScanPointXYZ>(finalCount);
+
+                _concatKernel(
+                    finalCount,
+                    dExisting.View.SubView(0, existingCount),
+                    doTransform ? dCurrent.View : dValidRaw.View.SubView(0, validCount),
+                    dFinal.View);
+
+                _acc.Synchronize();
+
+                finalPoints = dFinal.GetAsArray1D();
+            }
+            else
+            {
+                finalPoints = doTransform
+                    ? dCurrent.GetAsArray1D()
+                    : dValidRaw.GetAsArray1D().Take(validCount).ToArray();
+            }
+
+            // GPU -> CPU
+            var nullPoints = dNullRaw.GetAsArray1D()
+                .Take(nullCount)
+                .Select(n => (n.Point, n.Reason))
+                .ToList();
+
+            return new BuildCloudGpuResult(new PointCloud(finalPoints), nullPoints);
+        }
+        finally
+        {
+            dCurrent?.Dispose();
         }
     }
 }
