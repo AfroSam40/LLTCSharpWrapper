@@ -1,9 +1,210 @@
-# Visual Studio / .NET build output
-bin/
-obj/
-.vs/
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Linq;
+using ILGPU;
+using ILGPU.Runtime;
 
-# User-specific VS files
-*.user
-*.suo
-*.rsuser
+public partial class PCP
+{
+    private sealed class XYSpatialIndex
+    {
+        public ScanPointXYZ[] Points;
+        public double CellSize;
+        public double MinX;
+        public double MinY;
+        public Dictionary<long, int[]> Cells;
+
+        public XYSpatialIndex(
+            ScanPointXYZ[] points,
+            double cellSize,
+            double minX,
+            double minY,
+            Dictionary<long, int[]> cells)
+        {
+            Points = points;
+            CellSize = cellSize;
+            MinX = minX;
+            MinY = minY;
+            Cells = cells;
+        }
+    }
+
+    private static readonly object _xySpatialIndexLock = new();
+    private static XYSpatialIndex? _xySpatialIndex;
+
+    private static readonly Action<
+        Index1D,
+        ArrayView<ScanPointXYZ>,
+        ArrayView<long>,
+        double,
+        double,
+        double> _buildXYCellKeysKernel =
+            _acc.LoadAutoGroupedStreamKernel<
+                Index1D,
+                ArrayView<ScanPointXYZ>,
+                ArrayView<long>,
+                double,
+                double,
+                double>(BuildXYCellKeysKernel);
+
+    private static void BuildXYCellKeysKernel(
+        Index1D i,
+        ArrayView<ScanPointXYZ> points,
+        ArrayView<long> cellKeys,
+        double minX,
+        double minY,
+        double cellSize)
+    {
+        if (i >= points.Length)
+            return;
+
+        var p = points[i];
+
+        int cellX = (int)((p.X - minX) / cellSize);
+        int cellY = (int)((p.Y - minY) / cellSize);
+
+        if (cellX < 0) cellX = 0;
+        if (cellY < 0) cellY = 0;
+
+        cellKeys[i] = PackCellKey(cellX, cellY);
+    }
+
+    private static long PackCellKey(int cellX, int cellY)
+    {
+        return ((long)cellX << 32) | (uint)cellY;
+    }
+
+    public static void BuildXYSpatialIndex_GPU(PointCloud cloud, double cellSize)
+    {
+        if (cloud == null)
+            throw new ArgumentNullException(nameof(cloud));
+
+        if (cloud.Points == null || cloud.Points.Count == 0)
+            throw new ArgumentException("Point cloud is empty.", nameof(cloud));
+
+        if (cellSize <= 0)
+            throw new ArgumentOutOfRangeException(nameof(cellSize));
+
+        ScanPointXYZ[] points = cloud.Points.ToArray();
+
+        double minX = points[0].X;
+        double minY = points[0].Y;
+
+        // One-time CPU bounds pass.
+        for (int i = 1; i < points.Length; i++)
+        {
+            if (points[i].X < minX) minX = points[i].X;
+            if (points[i].Y < minY) minY = points[i].Y;
+        }
+
+        long[] cellKeys;
+
+        using (var dPoints = _acc.Allocate1D(points))
+        using (var dCellKeys = _acc.Allocate1D<long>(points.Length))
+        {
+            _buildXYCellKeysKernel(
+                points.Length,
+                dPoints.View,
+                dCellKeys.View,
+                minX,
+                minY,
+                cellSize);
+
+            _acc.Synchronize();
+
+            cellKeys = dCellKeys.GetAsArray1D();
+        }
+
+        var tempCells = new Dictionary<long, List<int>>();
+
+        for (int i = 0; i < cellKeys.Length; i++)
+        {
+            long key = cellKeys[i];
+
+            if (!tempCells.TryGetValue(key, out var list))
+            {
+                list = new List<int>();
+                tempCells[key] = list;
+            }
+
+            list.Add(i);
+        }
+
+        var finalCells = new Dictionary<long, int[]>(tempCells.Count);
+
+        foreach (var kvp in tempCells)
+            finalCells[kvp.Key] = kvp.Value.ToArray();
+
+        lock (_xySpatialIndexLock)
+        {
+            _xySpatialIndex = new XYSpatialIndex(
+                points,
+                cellSize,
+                minX,
+                minY,
+                finalCells);
+        }
+    }
+
+    public static PointCloud CropToRectangleXY_Indexed(RectangleF rect, bool rectIsCenterBased = true)
+    {
+        XYSpatialIndex index;
+
+        lock (_xySpatialIndexLock)
+        {
+            if (_xySpatialIndex == null)
+                throw new InvalidOperationException("XY spatial index has not been built.");
+
+            index = _xySpatialIndex;
+        }
+
+        if (rectIsCenterBased)
+        {
+            rect = new RectangleF(
+                rect.X - rect.Width / 2f,
+                rect.Y - rect.Height / 2f,
+                rect.Width,
+                rect.Height);
+        }
+
+        double left = rect.Left;
+        double right = rect.Right;
+        double top = rect.Top;
+        double bottom = rect.Bottom;
+
+        int minCellX = (int)((left - index.MinX) / index.CellSize);
+        int maxCellX = (int)((right - index.MinX) / index.CellSize);
+        int minCellY = (int)((top - index.MinY) / index.CellSize);
+        int maxCellY = (int)((bottom - index.MinY) / index.CellSize);
+
+        if (minCellX < 0) minCellX = 0;
+        if (minCellY < 0) minCellY = 0;
+
+        var result = new List<ScanPointXYZ>();
+
+        for (int cy = minCellY; cy <= maxCellY; cy++)
+        {
+            for (int cx = minCellX; cx <= maxCellX; cx++)
+            {
+                long key = PackCellKey(cx, cy);
+
+                if (!index.Cells.TryGetValue(key, out int[] pointIndices))
+                    continue;
+
+                for (int i = 0; i < pointIndices.Length; i++)
+                {
+                    var p = index.Points[pointIndices[i]];
+
+                    if (p.X >= left && p.X <= right &&
+                        p.Y >= top && p.Y <= bottom)
+                    {
+                        result.Add(p);
+                    }
+                }
+            }
+        }
+
+        return new PointCloud(result);
+    }
+}
