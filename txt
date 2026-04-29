@@ -1,55 +1,57 @@
 using HelixToolkit.Wpf.SharpDX;
 using SharpDX;
-using System.Windows.Media.Media3D;
+using System;
+using System.Diagnostics;
+using System.Windows.Media;
 
-public static GroupModel3D CreateTransformAxesVisual(
+private static void SetTransformAxesVisual(
+    GroupModel3D gAxisVisual,
     PCP.Transform transform,
     double axisLength = 10.0,
     double lineThickness = 2.0)
 {
+    if (gAxisVisual == null)
+        throw new ArgumentNullException(nameof(gAxisVisual));
+
+    gAxisVisual.Children.Clear();
+
     var v = transform.transformRaw;
 
-    var origin = new Vector3(
-        (float)v.tx,
-        (float)v.ty,
-        (float)v.tz);
+    Debug.WriteLine(
+        $"Axis Transform: tx={v.tx}, ty={v.ty}, tz={v.tz}, " +
+        $"R=[{v.r00},{v.r01},{v.r02}; {v.r10},{v.r11},{v.r12}; {v.r20},{v.r21},{v.r22}], s={v.s}");
 
-    // Because your transform applies R as rows:
-    // x' = r00*x + r01*y + r02*z + tx
-    // y' = r10*x + r11*y + r12*z + ty
-    // z' = r20*x + r21*y + r22*z + tz
-    //
-    // The transformed local basis vectors are the columns of R.
+    var origin = new Vector3(
+        SafeFloat(v.tx),
+        SafeFloat(v.ty),
+        SafeFloat(v.tz));
+
+    if (!IsFinite(origin))
+        throw new InvalidOperationException($"Invalid transform origin: {origin}");
+
+    // Columns of R are the transformed local basis vectors for your transform convention.
     var xAxis = new Vector3(
-        (float)v.r00,
-        (float)v.r10,
-        (float)v.r20);
+        SafeFloat(v.r00),
+        SafeFloat(v.r10),
+        SafeFloat(v.r20));
 
     var yAxis = new Vector3(
-        (float)v.r01,
-        (float)v.r11,
-        (float)v.r21);
+        SafeFloat(v.r01),
+        SafeFloat(v.r11),
+        SafeFloat(v.r21));
 
     var zAxis = new Vector3(
-        (float)v.r02,
-        (float)v.r12,
-        (float)v.r22);
+        SafeFloat(v.r02),
+        SafeFloat(v.r12),
+        SafeFloat(v.r22));
 
-    xAxis.Normalize();
-    yAxis.Normalize();
-    zAxis.Normalize();
+    xAxis = SafeNormalize(xAxis, Vector3.UnitX) * (float)axisLength;
+    yAxis = SafeNormalize(yAxis, Vector3.UnitY) * (float)axisLength;
+    zAxis = SafeNormalize(zAxis, Vector3.UnitZ) * (float)axisLength;
 
-    xAxis *= (float)axisLength;
-    yAxis *= (float)axisLength;
-    zAxis *= (float)axisLength;
-
-    var group = new GroupModel3D();
-
-    group.Children.Add(CreateLine(origin, origin + xAxis, Color.Red, lineThickness));
-    group.Children.Add(CreateLine(origin, origin + yAxis, Color.Green, lineThickness));
-    group.Children.Add(CreateLine(origin, origin + zAxis, Color.Blue, lineThickness));
-
-    return group;
+    gAxisVisual.Children.Add(CreateLine(origin, origin + xAxis, Colors.Red, lineThickness));
+    gAxisVisual.Children.Add(CreateLine(origin, origin + yAxis, Colors.Green, lineThickness));
+    gAxisVisual.Children.Add(CreateLine(origin, origin + zAxis, Colors.Blue, lineThickness));
 }
 
 private static LineGeometryModel3D CreateLine(
@@ -58,6 +60,9 @@ private static LineGeometryModel3D CreateLine(
     Color color,
     double thickness)
 {
+    if (!IsFinite(start) || !IsFinite(end))
+        throw new InvalidOperationException($"Invalid line point. Start={start}, End={end}");
+
     var geometry = new LineGeometry3D
     {
         Positions = new Vector3Collection
@@ -78,4 +83,38 @@ private static LineGeometryModel3D CreateLine(
         Color = color,
         Thickness = thickness
     };
+}
+
+private static Vector3 SafeNormalize(Vector3 v, Vector3 fallback)
+{
+    if (!IsFinite(v))
+        return fallback;
+
+    float lenSq = v.LengthSquared();
+
+    if (!float.IsFinite(lenSq) || lenSq < 1e-12f)
+        return fallback;
+
+    return v / MathF.Sqrt(lenSq);
+}
+
+private static bool IsFinite(Vector3 v)
+{
+    return float.IsFinite(v.X) &&
+           float.IsFinite(v.Y) &&
+           float.IsFinite(v.Z);
+}
+
+private static float SafeFloat(double value)
+{
+    if (double.IsNaN(value) || double.IsInfinity(value))
+        return float.NaN;
+
+    if (value > float.MaxValue)
+        return float.MaxValue;
+
+    if (value < -float.MaxValue)
+        return -float.MaxValue;
+
+    return (float)value;
 }
