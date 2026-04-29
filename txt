@@ -1,1 +1,81 @@
-Point-cloud stitching is currently performed only after the scan operation has completed. During individual scan passes, the IPC is often idle, which creates an opportunity to perform stitching asynchronously in the background. By stitching completed scan passes while later passes are still running, we can distribute the workload across the scan sequence and reduce the amount of stitching required at the end. This should lower post-scan processing time and improve overall throughput without impacting active scan acquisition.
+using HelixToolkit.Wpf.SharpDX;
+using SharpDX;
+using System.Windows.Media.Media3D;
+
+public static GroupModel3D CreateTransformAxesVisual(
+    PCP.Transform transform,
+    double axisLength = 10.0,
+    double lineThickness = 2.0)
+{
+    var v = transform.transformRaw;
+
+    var origin = new Vector3(
+        (float)v.tx,
+        (float)v.ty,
+        (float)v.tz);
+
+    // Because your transform applies R as rows:
+    // x' = r00*x + r01*y + r02*z + tx
+    // y' = r10*x + r11*y + r12*z + ty
+    // z' = r20*x + r21*y + r22*z + tz
+    //
+    // The transformed local basis vectors are the columns of R.
+    var xAxis = new Vector3(
+        (float)v.r00,
+        (float)v.r10,
+        (float)v.r20);
+
+    var yAxis = new Vector3(
+        (float)v.r01,
+        (float)v.r11,
+        (float)v.r21);
+
+    var zAxis = new Vector3(
+        (float)v.r02,
+        (float)v.r12,
+        (float)v.r22);
+
+    xAxis.Normalize();
+    yAxis.Normalize();
+    zAxis.Normalize();
+
+    xAxis *= (float)axisLength;
+    yAxis *= (float)axisLength;
+    zAxis *= (float)axisLength;
+
+    var group = new GroupModel3D();
+
+    group.Children.Add(CreateLine(origin, origin + xAxis, Color.Red, lineThickness));
+    group.Children.Add(CreateLine(origin, origin + yAxis, Color.Green, lineThickness));
+    group.Children.Add(CreateLine(origin, origin + zAxis, Color.Blue, lineThickness));
+
+    return group;
+}
+
+private static LineGeometryModel3D CreateLine(
+    Vector3 start,
+    Vector3 end,
+    Color color,
+    double thickness)
+{
+    var geometry = new LineGeometry3D
+    {
+        Positions = new Vector3Collection
+        {
+            start,
+            end
+        },
+        Indices = new IntCollection
+        {
+            0,
+            1
+        }
+    };
+
+    return new LineGeometryModel3D
+    {
+        Geometry = geometry,
+        Color = color,
+        Thickness = thickness
+    };
+}
