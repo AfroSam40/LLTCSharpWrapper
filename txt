@@ -1,120 +1,42 @@
-using HelixToolkit.Wpf.SharpDX;
-using SharpDX;
-using System;
-using System.Diagnostics;
-using System.Windows.Media;
-
-private static void SetTransformAxesVisual(
-    GroupModel3D gAxisVisual,
-    PCP.Transform transform,
-    double axisLength = 10.0,
-    double lineThickness = 2.0)
+public static Vector3 WorldToPalletLocal(Vector3 worldPoint, PCP.Transform palletTransform)
 {
-    if (gAxisVisual == null)
-        throw new ArgumentNullException(nameof(gAxisVisual));
+    var t = palletTransform.transformRaw;
 
-    gAxisVisual.Children.Clear();
+    // World origin of pallet frame
+    double ox = t.tx;
+    double oy = t.ty;
+    double oz = t.tz;
 
-    var v = transform.transformRaw;
+    // Remove translation first
+    double dx = worldPoint.X - ox;
+    double dy = worldPoint.Y - oy;
+    double dz = worldPoint.Z - oz;
 
-    Debug.WriteLine(
-        $"Axis Transform: tx={v.tx}, ty={v.ty}, tz={v.tz}, " +
-        $"R=[{v.r00},{v.r01},{v.r02}; {v.r10},{v.r11},{v.r12}; {v.r20},{v.r21},{v.r22}], s={v.s}");
+    // If transform uses scale, undo it before inverse rotation
+    double s = Math.Abs(t.s) < 1e-12 ? 1.0 : t.s;
+    dx /= s;
+    dy /= s;
+    dz /= s;
 
-    var origin = new Vector3(
-        SafeFloat(v.tx),
-        SafeFloat(v.ty),
-        SafeFloat(v.tz));
+    /*
+        Your forward transform is:
 
-    if (!IsFinite(origin))
-        throw new InvalidOperationException($"Invalid transform origin: {origin}");
+        world.X = r00*local.X + r01*local.Y + r02*local.Z + tx
+        world.Y = r10*local.X + r11*local.Y + r12*local.Z + ty
+        world.Z = r20*local.X + r21*local.Y + r22*local.Z + tz
 
-    // Columns of R are the transformed local basis vectors for your transform convention.
-    var xAxis = new Vector3(
-        SafeFloat(v.r00),
-        SafeFloat(v.r10),
-        SafeFloat(v.r20));
+        Therefore:
 
-    var yAxis = new Vector3(
-        SafeFloat(v.r01),
-        SafeFloat(v.r11),
-        SafeFloat(v.r21));
+        world - origin = R * local
 
-    var zAxis = new Vector3(
-        SafeFloat(v.r02),
-        SafeFloat(v.r12),
-        SafeFloat(v.r22));
+        For a rigid rotation matrix:
 
-    xAxis = SafeNormalize(xAxis, Vector3.UnitX) * (float)axisLength;
-    yAxis = SafeNormalize(yAxis, Vector3.UnitY) * (float)axisLength;
-    zAxis = SafeNormalize(zAxis, Vector3.UnitZ) * (float)axisLength;
+        local = R^T * (world - origin)
+    */
 
-    gAxisVisual.Children.Add(CreateLine(origin, origin + xAxis, Colors.Red, lineThickness));
-    gAxisVisual.Children.Add(CreateLine(origin, origin + yAxis, Colors.Green, lineThickness));
-    gAxisVisual.Children.Add(CreateLine(origin, origin + zAxis, Colors.Blue, lineThickness));
-}
+    double lx = t.r00 * dx + t.r10 * dy + t.r20 * dz;
+    double ly = t.r01 * dx + t.r11 * dy + t.r21 * dz;
+    double lz = t.r02 * dx + t.r12 * dy + t.r22 * dz;
 
-private static LineGeometryModel3D CreateLine(
-    Vector3 start,
-    Vector3 end,
-    Color color,
-    double thickness)
-{
-    if (!IsFinite(start) || !IsFinite(end))
-        throw new InvalidOperationException($"Invalid line point. Start={start}, End={end}");
-
-    var geometry = new LineGeometry3D
-    {
-        Positions = new Vector3Collection
-        {
-            start,
-            end
-        },
-        Indices = new IntCollection
-        {
-            0,
-            1
-        }
-    };
-
-    return new LineGeometryModel3D
-    {
-        Geometry = geometry,
-        Color = color,
-        Thickness = thickness
-    };
-}
-
-private static Vector3 SafeNormalize(Vector3 v, Vector3 fallback)
-{
-    if (!IsFinite(v))
-        return fallback;
-
-    float lenSq = v.LengthSquared();
-
-    if (!float.IsFinite(lenSq) || lenSq < 1e-12f)
-        return fallback;
-
-    return v / MathF.Sqrt(lenSq);
-}
-
-private static bool IsFinite(Vector3 v)
-{
-    return float.IsFinite(v.X) &&
-           float.IsFinite(v.Y) &&
-           float.IsFinite(v.Z);
-}
-
-private static float SafeFloat(double value)
-{
-    if (double.IsNaN(value) || double.IsInfinity(value))
-        return float.NaN;
-
-    if (value > float.MaxValue)
-        return float.MaxValue;
-
-    if (value < -float.MaxValue)
-        return -float.MaxValue;
-
-    return (float)value;
+    return new Vector3((float)lx, (float)ly, (float)lz);
 }
