@@ -1,165 +1,47 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using Newtonsoft.Json;
-
-public class JsonManager
+public static PCP.Transform SmallRelativeToBig(
+    PCP.Transform bigToWorld,
+    PCP.Transform smallToWorld)
 {
-    private readonly string _filePath;
-    private Dictionary<string, object> _data;
+    var bigInv = bigToWorld.Inverted();
+    return Compose(bigInv, smallToWorld);
+}
 
-    private static readonly JsonSerializerSettings Settings = new JsonSerializerSettings
-    {
-        Formatting = Formatting.Indented,
-        TypeNameHandling = TypeNameHandling.Auto
-    };
 
-    public JsonManager(string filePathOrName)
-    {
-        if (string.IsNullOrWhiteSpace(filePathOrName))
-            throw new ArgumentException("File path or name cannot be null or empty.", nameof(filePathOrName));
+public static PCP.Transform Compose(PCP.Transform a, PCP.Transform b)
+{
+    // result = a after b
+    // p' = a(b(p))
 
-        _filePath = ResolveFilePath(filePathOrName);
-        _data = new Dictionary<string, object>();
+    var A = a.transformRaw;
+    var B = b.transformRaw;
 
-        Load();
-    }
+    double s = A.s * B.s;
 
-    private string ResolveFilePath(string filePathOrName)
-    {
-        string path = filePathOrName;
+    double r00 = A.r00 * B.r00 + A.r01 * B.r10 + A.r02 * B.r20;
+    double r01 = A.r00 * B.r01 + A.r01 * B.r11 + A.r02 * B.r21;
+    double r02 = A.r00 * B.r02 + A.r01 * B.r12 + A.r02 * B.r22;
 
-        bool hasDirectory = !string.IsNullOrWhiteSpace(Path.GetDirectoryName(path));
+    double r10 = A.r10 * B.r00 + A.r11 * B.r10 + A.r12 * B.r20;
+    double r11 = A.r10 * B.r01 + A.r11 * B.r11 + A.r12 * B.r21;
+    double r12 = A.r10 * B.r02 + A.r11 * B.r12 + A.r12 * B.r22;
 
-        if (!hasDirectory)
-        {
-            path = Path.Combine(AppContext.BaseDirectory, path);
-        }
+    double r20 = A.r20 * B.r00 + A.r21 * B.r10 + A.r22 * B.r20;
+    double r21 = A.r20 * B.r01 + A.r21 * B.r11 + A.r22 * B.r21;
+    double r22 = A.r20 * B.r02 + A.r21 * B.r12 + A.r22 * B.r22;
 
-        if (Path.GetExtension(path) == string.Empty)
-        {
-            path += ".json";
-        }
+    // a(b(p)) = sA*RA*(sB*RB*p + tB) + tA
+    //          = sA*sB*RA*RB*p + sA*RA*tB + tA
+    double tx = A.s * (A.r00 * B.tx + A.r01 * B.ty + A.r02 * B.tz) + A.tx;
+    double ty = A.s * (A.r10 * B.tx + A.r11 * B.ty + A.r12 * B.tz) + A.ty;
+    double tz = A.s * (A.r20 * B.tx + A.r21 * B.ty + A.r22 * B.tz) + A.tz;
 
-        return path;
-    }
-
-    private void Load()
-    {
-        if (!File.Exists(_filePath))
-        {
-            _data = new Dictionary<string, object>();
-            return;
-        }
-
-        string json = File.ReadAllText(_filePath);
-
-        if (string.IsNullOrWhiteSpace(json))
-        {
-            _data = new Dictionary<string, object>();
-            return;
-        }
-
-        _data = JsonConvert.DeserializeObject<Dictionary<string, object>>(json, Settings)
-                ?? new Dictionary<string, object>();
-    }
-
-    public void Save<T>(string name, T data, bool overwrite = false)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-            throw new ArgumentException("Save name cannot be null or empty.", nameof(name));
-
-        if (_data.ContainsKey(name) && overwrite == false)
-        {
-            throw new InvalidOperationException(
-                $"An item named '{name}' already exists. Set overwrite to true to replace it.");
-        }
-
-        _data[name] = data!;
-
-        WriteToFile();
-    }
-
-    private void WriteToFile()
-    {
-        string? directory = Path.GetDirectoryName(_filePath);
-
-        if (!string.IsNullOrWhiteSpace(directory) && !Directory.Exists(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
-        string json = JsonConvert.SerializeObject(_data, Settings);
-
-        File.WriteAllText(_filePath, json);
-    }
-
-    public T? Get<T>(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-            throw new ArgumentException("Name cannot be null or empty.", nameof(name));
-
-        if (!_data.ContainsKey(name))
-            throw new KeyNotFoundException($"No item named '{name}' exists in the JSON file.");
-
-        object value = _data[name];
-
-        if (value is T typedValue)
-            return typedValue;
-
-        string json = JsonConvert.SerializeObject(value, Settings);
-
-        return JsonConvert.DeserializeObject<T>(json, Settings);
-    }
-
-    public bool TryGet<T>(string name, out T? value)
-    {
-        value = default;
-
-        if (string.IsNullOrWhiteSpace(name))
-            return false;
-
-        if (!_data.TryGetValue(name, out object? rawValue))
-            return false;
-
-        try
-        {
-            if (rawValue is T typedValue)
-            {
-                value = typedValue;
-                return true;
-            }
-
-            string json = JsonConvert.SerializeObject(rawValue, Settings);
-            value = JsonConvert.DeserializeObject<T>(json, Settings);
-
-            return true;
-        }
-        catch
-        {
-            value = default;
-            return false;
-        }
-    }
-
-    public bool Contains(string name)
-    {
-        return _data.ContainsKey(name);
-    }
-
-    public void Remove(string name)
-    {
-        if (_data.Remove(name))
-        {
-            WriteToFile();
-        }
-    }
-
-    public void Clear()
-    {
-        _data.Clear();
-        WriteToFile();
-    }
-
-    public string FilePath => _filePath;
+    return new PCP.Transform(
+        (
+            r00, r01, r02,
+            r10, r11, r12,
+            r20, r21, r22,
+            tx, ty, tz,
+            s
+        )
+    );
 }
