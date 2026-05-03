@@ -1,47 +1,20 @@
-public static PCP.Transform SmallRelativeToBig(
-    PCP.Transform bigToWorld,
-    PCP.Transform smallToWorld)
+public bool ContainsInlierXY(
+    ScanPointXYZ point,
+    double xyTolerance = 0.01)
 {
-    var bigInv = bigToWorld.Inverted();
-    return Compose(bigInv, smallToWorld);
-}
+    if (InlierPoints == null || InlierPoints.Count == 0)
+        return false;
 
+    double xyTolSq = xyTolerance * xyTolerance;
 
-public static PCP.Transform Compose(PCP.Transform a, PCP.Transform b)
-{
-    // result = a after b
-    // p' = a(b(p))
+    foreach (var p in InlierPoints)
+    {
+        double dx = p.X - point.X;
+        double dy = p.Y - point.Y;
 
-    var A = a.transformRaw;
-    var B = b.transformRaw;
+        if ((dx * dx + dy * dy) <= xyTolSq)
+            return true;
+    }
 
-    double s = A.s * B.s;
-
-    double r00 = A.r00 * B.r00 + A.r01 * B.r10 + A.r02 * B.r20;
-    double r01 = A.r00 * B.r01 + A.r01 * B.r11 + A.r02 * B.r21;
-    double r02 = A.r00 * B.r02 + A.r01 * B.r12 + A.r02 * B.r22;
-
-    double r10 = A.r10 * B.r00 + A.r11 * B.r10 + A.r12 * B.r20;
-    double r11 = A.r10 * B.r01 + A.r11 * B.r11 + A.r12 * B.r21;
-    double r12 = A.r10 * B.r02 + A.r11 * B.r12 + A.r12 * B.r22;
-
-    double r20 = A.r20 * B.r00 + A.r21 * B.r10 + A.r22 * B.r20;
-    double r21 = A.r20 * B.r01 + A.r21 * B.r11 + A.r22 * B.r21;
-    double r22 = A.r20 * B.r02 + A.r21 * B.r12 + A.r22 * B.r22;
-
-    // a(b(p)) = sA*RA*(sB*RB*p + tB) + tA
-    //          = sA*sB*RA*RB*p + sA*RA*tB + tA
-    double tx = A.s * (A.r00 * B.tx + A.r01 * B.ty + A.r02 * B.tz) + A.tx;
-    double ty = A.s * (A.r10 * B.tx + A.r11 * B.ty + A.r12 * B.tz) + A.ty;
-    double tz = A.s * (A.r20 * B.tx + A.r21 * B.ty + A.r22 * B.tz) + A.tz;
-
-    return new PCP.Transform(
-        (
-            r00, r01, r02,
-            r10, r11, r12,
-            r20, r21, r22,
-            tx, ty, tz,
-            s
-        )
-    );
+    return false;
 }
