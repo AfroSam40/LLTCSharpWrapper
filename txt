@@ -1,20 +1,7 @@
-public bool ContainsInlierXY(
-    ScanPointXYZ point,
-    double xyTolerance = 0.01)
-{
-    if (InlierPoints == null || InlierPoints.Count == 0)
-        return false;
-
-    double xyTolSq = xyTolerance * xyTolerance;
-
-    foreach (var p in InlierPoints)
-    {
-        double dx = p.X - point.X;
-        double dy = p.Y - point.Y;
-
-        if ((dx * dx + dy * dy) <= xyTolSq)
-            return true;
-    }
-
-    return false;
-}
+(
+    double r00, double r01, double r02,
+    double r10, double r11, double r12,
+    double r20, double r21, double r22,
+    double tx,  double ty,  double tz,
+    double s
+)
