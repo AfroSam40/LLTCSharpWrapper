@@ -1,4 +1,48 @@
+// Final work/pallet-to-world transform
+
 R =
 [ xDirection.X   yDirection.X   zDirection.X ]
 [ xDirection.Y   yDirection.Y   zDirection.Y ]
 [ xDirection.Z   yDirection.Z   zDirection.Z ]
+
+t =
+[ originWorld.X ]
+[ originWorld.Y ]
+[ originWorld.Z ]
+
+s = 1
+
+
+// Full 4x4 homogeneous transform
+
+T =
+[ xDirection.X   yDirection.X   zDirection.X   originWorld.X ]
+[ xDirection.Y   yDirection.Y   zDirection.Y   originWorld.Y ]
+[ xDirection.Z   yDirection.Z   zDirection.Z   originWorld.Z ]
+[      0              0              0              1        ]
+
+
+// Point transform
+
+[ world.X ]   [ xDirection.X   yDirection.X   zDirection.X   originWorld.X ]   [ local.X ]
+[ world.Y ] = [ xDirection.Y   yDirection.Y   zDirection.Y   originWorld.Y ] * [ local.Y ]
+[ world.Z ]   [ xDirection.Z   yDirection.Z   zDirection.Z   originWorld.Z ]   [ local.Z ]
+[   1     ]   [      0              0              0              1        ]   [   1     ]
+
+
+// Expanded form
+
+world.X = xDirection.X * local.X
+        + yDirection.X * local.Y
+        + zDirection.X * local.Z
+        + originWorld.X;
+
+world.Y = xDirection.Y * local.X
+        + yDirection.Y * local.Y
+        + zDirection.Y * local.Z
+        + originWorld.Y;
+
+world.Z = xDirection.Z * local.X
+        + yDirection.Z * local.Y
+        + zDirection.Z * local.Z
+        + originWorld.Z;
