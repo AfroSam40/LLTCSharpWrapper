@@ -1,3 +1,4 @@
-x' = s * (r00 * x + r01 * y + r02 * z) + tx;
-y' = s * (r10 * x + r11 * y + r12 * z) + ty;
-z' = s * (r20 * x + r21 * y + r22 * z) + tz;
+R =
+[ xDirection.X   yDirection.X   zDirection.X ]
+[ xDirection.Y   yDirection.Y   zDirection.Y ]
+[ xDirection.Z   yDirection.Z   zDirection.Z ]
