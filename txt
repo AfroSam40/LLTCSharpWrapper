@@ -1,1 +1,36 @@
-Whenever a pallet is taught to the gantry, a pallet-to-world transform is generated and saved as the teach frame. This teach frame creates the association between the vision coordinate frame and the dispense coordinate frame, allowing the system to compensate for pallet-to-pallet misalignment. The teach-to-world transform is stored in Config.json using the following format:
+estimates the volume of a 3D blob above a fitted baseline plane. The algorithm works by slicing the blob into thin height bands, calculating the 2D cross-sectional area of each slice, and summing the slice volumes.
+Conceptually:
+Total Volume ≈ Σ(slice area × slice thickness)
+
+Algorithm goes through the following steps to estimate volume:
+1. Validate input point cloud and baseline plane.
+2. Normalize the baseline plane normal.
+3. Build a local coordinate system aligned to the baseline plane.
+4. Convert every point into local plane coordinates:
+      u = local X on plane
+      v = local Y on plane
+      h = height above plane
+5. Determine the maximum height of the blob.
+6. Split the height range into slices.
+7. For each slice:
+      a. collect points whose height falls inside the slice
+      b. remove radial XY outliers
+      c. compute a 2D convex hull
+      d. calculate hull area
+      e. multiply area by slice thickness
+      f. convert hull and centroid back to world coordinates
+8. Sum all slice volume contributions.
+
+The method does not calculate volume directly in world XYZ coordinates. Instead, it builds a local coordinate system based on the fitted baseline plane.
+
+This is important because the baseline plane may be tilted relative to machine/world Z. Volume should be measured relative to the local surface plane, not blindly along world Z.
+
+
+The method supports an optional lookAhead mode:
+
+When look-ahead is enabled for lower slices, the slice may collect points up to a higher active limit:
+
+This can help early slices form a more stable footprint when the blob has sparse data near the bottom or when the surface does not have enough points in thin bands.
+
+
+
