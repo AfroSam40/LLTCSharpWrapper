@@ -1,14 +1,1 @@
-Vector3 palletZ_InWorld = new Vector3(
-    palletToWorld.transformRaw.r02,
-    palletToWorld.transformRaw.r12,
-    palletToWorld.transformRaw.r22);
-
-Vector3 teachZ_InWorld = new Vector3(
-    teachToWorld.transformRaw.r02,
-    teachToWorld.transformRaw.r12,
-    teachToWorld.transformRaw.r22);
-
-palletZ_InWorld = Vector3.Normalize(palletZ_InWorld);
-teachZ_InWorld = Vector3.Normalize(teachZ_InWorld);
-
-double cosTheta = Vector3.Dot(palletZ_InWorld, teachZ_InWorld);
+Whenever a pallet is taught to the gantry, a pallet-to-world transform is generated and saved as the teach frame. This teach frame creates the association between the vision coordinate frame and the dispense coordinate frame, allowing the system to compensate for pallet-to-pallet misalignment. The teach-to-world transform is stored in Config.json using the following format:
