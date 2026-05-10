@@ -1,3 +1,41 @@
-Hello,
-We recently received an order containing incorrect items. We ordered two items: an SSI encoder read head and an extension cable, but instead received a BML03HJ BISSC readhead.
-I’ve attached documentation showing the original order compared with what we received. Please review and advise on the next steps for correcting this shipment.
+public async Task<string> UploadTextAsync(
+    string textContent,
+    string fileName,
+    CancellationToken ct = default)
+{
+    if (string.IsNullOrWhiteSpace(textContent))
+        throw new ArgumentNullException(nameof(textContent));
+
+    if (string.IsNullOrWhiteSpace(fileName))
+        throw new ArgumentNullException(nameof(fileName));
+
+    if (!fileName.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
+        fileName += ".txt";
+
+    string token = await GetAuthTokenAsync(ct).ConfigureAwait(false);
+
+    byte[] fileBytes = System.Text.Encoding.UTF8.GetBytes(textContent);
+
+    using var fileContent = new ByteArrayContent(fileBytes);
+    fileContent.Headers.ContentType =
+        new System.Net.Http.Headers.MediaTypeHeaderValue("text/plain");
+
+    using var form = new MultipartFormDataContent
+    {
+        { fileContent, "file", fileName },
+        { new StringContent(fileName), "key" },
+        { new StringContent(fileName), "DisplayName" }
+    };
+
+    using var req = new HttpRequestMessage(HttpMethod.Post, _fileUploadUrl);
+    req.Headers.Authorization =
+        new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+    req.Content = form;
+
+    using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
+    string body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+
+    resp.EnsureSuccessStatusCode();
+
+    return body;
+}
