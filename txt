@@ -1,41 +1,160 @@
-public async Task<string> UploadTextAsync(
-    string textContent,
-    string fileName,
-    CancellationToken ct = default)
+private sealed class StitchStep
 {
-    if (string.IsNullOrWhiteSpace(textContent))
-        throw new ArgumentNullException(nameof(textContent));
+    public PointCloud SrcCloud { get; init; }
+    public PointCloud DstCloud { get; init; }
 
-    if (string.IsNullOrWhiteSpace(fileName))
-        throw new ArgumentNullException(nameof(fileName));
+    public RectangleF SrcFidCrop { get; init; }
+    public RectangleF DstFidCrop { get; init; }
 
-    if (!fileName.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
-        fileName += ".txt";
+    public string Name { get; init; } = "";
 
-    string token = await GetAuthTokenAsync(ct).ConfigureAwait(false);
-
-    byte[] fileBytes = System.Text.Encoding.UTF8.GetBytes(textContent);
-
-    using var fileContent = new ByteArrayContent(fileBytes);
-    fileContent.Headers.ContentType =
-        new System.Net.Http.Headers.MediaTypeHeaderValue("text/plain");
-
-    using var form = new MultipartFormDataContent
+    public StitchStep(
+        PointCloud srcCloud,
+        PointCloud dstCloud,
+        RectangleF srcFidCrop,
+        RectangleF dstFidCrop,
+        string name)
     {
-        { fileContent, "file", fileName },
-        { new StringContent(fileName), "key" },
-        { new StringContent(fileName), "DisplayName" }
+        SrcCloud = srcCloud;
+        DstCloud = dstCloud;
+        SrcFidCrop = srcFidCrop;
+        DstFidCrop = dstFidCrop;
+        Name = name;
+    }
+}
+
+private static bool StitchingCalib_BetweenScans()
+{
+    // Debug output folder
+    string baseDir = @"C:\Users\sfesseha-wa\Desktop\PointClouds";
+    string fileName = PCIO.GenerateUniqueTimestampName(baseDir).Replace(".pcd", "") + "_Calib";
+    string baseFolderPath = Path.Combine(baseDir, fileName);
+    string sFolderPath = Path.Combine(baseFolderPath, "Scan Passes");
+    Directory.CreateDirectory(sFolderPath);
+
+    if (scanClouds == null || scanClouds.Count < 2)
+    {
+        WriteLog("Need at least 2 scan clouds for scan-to-scan stitching calibration.");
+        return false;
+    }
+
+    // Plane/surface fit parameters for fiducial finding
+    double zThreshold = 0.5;
+    double xyThreshold = 0.3;
+    int minPoints = 1000;
+    PlaneFitParams planeFitParams = new(zThreshold, xyThreshold, minPoints);
+
+    /*
+        Define stitch chain here.
+
+        Each step means:
+            Transform DstCloud into SrcCloud frame
+            Then merge SrcCloud + transformed DstCloud
+
+        After each iteration, stitchedCloud becomes the new SrcCloud for the next step.
+    */
+
+    var stitchSteps = new List<(PointCloud dstCloud, RectangleF srcCrop, RectangleF dstCrop, string name)>
+    {
+        // Step 1:
+        // src = scanClouds[0]
+        // dst = scanClouds[1]
+        (
+            dstCloud: scanClouds[1],
+            srcCrop: new RectangleF(-95, 737, 50, 50),
+            dstCrop: new RectangleF(287, 729, 50, 50),
+            name: "First pass pair"
+        ),
+
+        // Step 2:
+        // src = result of step 1
+        // dst = scanClouds[2]
+        (
+            dstCloud: scanClouds[2],
+            srcCrop: new RectangleF(-494.5f, 734.4f, 50, 50),
+            dstCrop: new RectangleF(271f, 732f, 50, 50),
+            name: "Second pass pair"
+        )
+
+        // Add more steps here if needed:
+        // (
+        //     dstCloud: scanClouds[3],
+        //     srcCrop: new RectangleF(...),
+        //     dstCrop: new RectangleF(...),
+        //     name: "Third pass pair"
+        // )
     };
 
-    using var req = new HttpRequestMessage(HttpMethod.Post, _fileUploadUrl);
-    req.Headers.Authorization =
-        new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
-    req.Content = form;
+    if (stitchSteps.Any(step => step.dstCloud == null))
+    {
+        WriteLog("One or more stitch step destination clouds are null.");
+        return false;
+    }
 
-    using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
-    string body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+    if (scanClouds.Count < stitchSteps.Count + 1)
+    {
+        WriteLog($"Not enough scan clouds. Have {scanClouds.Count}, but stitch steps require {stitchSteps.Count + 1}.");
+        return false;
+    }
 
-    resp.EnsureSuccessStatusCode();
+    PointCloud stitchedCloud = scanClouds[0];
 
-    return body;
+    PCIO.SavePointCloud(Path.Combine(baseFolderPath, "initial src cloud"), stitchedCloud);
+
+    for (int i = 0; i < stitchSteps.Count; i++)
+    {
+        var step = stitchSteps[i];
+
+        var srcStitchParams = new StitchParams()
+        {
+            cloud = stitchedCloud,
+            fidCropRegions = new()
+            {
+                step.srcCrop
+            },
+            planeFitParams = planeFitParams
+        };
+
+        var dstStitchParams = new StitchParams()
+        {
+            cloud = step.dstCloud,
+            fidCropRegions = new()
+            {
+                step.dstCrop
+            },
+            planeFitParams = planeFitParams
+        };
+
+        var result = GetStitchingTransform(srcStitchParams, dstStitchParams, true);
+
+        if (!result.transform.HasValue)
+        {
+            WriteLog($"{step.name}: failed to calculate stitching transform.");
+            return false;
+        }
+
+        var transform = result.transform.Value;
+
+        stitchedCloud = StitchClouds(
+            new List<PointCloud>
+            {
+                stitchedCloud,
+                step.dstCloud
+            },
+            transform);
+
+        string safeName = step.name.Replace(" ", "_");
+
+        PCIO.SavePointCloud(
+            Path.Combine(baseFolderPath, $"{safeName}_stitched"),
+            stitchedCloud);
+
+        WriteLog($"{step.name} transform:\n{transform.transformRaw}");
+    }
+
+    PCIO.SavePointCloud(Path.Combine(baseFolderPath, "final cloud"), stitchedCloud);
+
+    finalCloud = stitchedCloud;
+
+    return true;
 }
