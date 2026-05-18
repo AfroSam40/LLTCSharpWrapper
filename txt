@@ -1,5 +1,136 @@
-_M_Grippers_Gripped_XYComps_Locked_ZComp_Released
-_M_Grippers_Gripped_XYComps_Released_ZComp_Locked
+public enum OffsetFrame
+{
+    Local,  // apply offset in this transform's local/source frame
+    World   // apply offset in this transform's destination/world frame
+}
 
-_M_Grippers_Released_XYComps_Locked_ZComp_Released
-_M_Grippers_Released_XYComps_Released_ZComp_Locked
+public enum Axis
+{
+    X,
+    Y,
+    Z
+}
+
+public Transform WithTranslationOffset(
+    Axis axis,
+    double distance,
+    OffsetFrame frame = OffsetFrame.Local)
+{
+    double dx = 0;
+    double dy = 0;
+    double dz = 0;
+
+    switch (axis)
+    {
+        case Axis.X:
+            dx = distance;
+            break;
+
+        case Axis.Y:
+            dy = distance;
+            break;
+
+        case Axis.Z:
+            dz = distance;
+            break;
+
+        default:
+            throw new ArgumentOutOfRangeException(nameof(axis), axis, null);
+    }
+
+    var offset = new Transform(
+        1, 0, 0,
+        0, 1, 0,
+        0, 0, 1,
+        dx, dy, dz,
+        1);
+
+    return ApplyOffset(offset, frame);
+}
+
+public Transform WithRotationOffset(
+    Axis axis,
+    double angleDeg,
+    OffsetFrame frame = OffsetFrame.Local)
+{
+    double angleRad = angleDeg * Math.PI / 180.0;
+    double c = Math.Cos(angleRad);
+    double s = Math.Sin(angleRad);
+
+    Transform offset;
+
+    switch (axis)
+    {
+        case Axis.X:
+            offset = new Transform(
+                1, 0,  0,
+                0, c, -s,
+                0, s,  c,
+                0, 0, 0,
+                1);
+            break;
+
+        case Axis.Y:
+            offset = new Transform(
+                 c, 0, s,
+                 0, 1, 0,
+                -s, 0, c,
+                 0, 0, 0,
+                 1);
+            break;
+
+        case Axis.Z:
+            offset = new Transform(
+                c, -s, 0,
+                s,  c, 0,
+                0,  0, 1,
+                0,  0, 0,
+                1);
+            break;
+
+        default:
+            throw new ArgumentOutOfRangeException(nameof(axis), axis, null);
+    }
+
+    return ApplyOffset(offset, frame);
+}
+
+public Transform WithOffset(
+    double dx,
+    double dy,
+    double dz,
+    double rxDeg,
+    double ryDeg,
+    double rzDeg,
+    OffsetFrame frame = OffsetFrame.Local)
+{
+    var offset = Identity
+        .WithRotationOffset(Axis.X, rxDeg, OffsetFrame.Local)
+        .WithRotationOffset(Axis.Y, ryDeg, OffsetFrame.Local)
+        .WithRotationOffset(Axis.Z, rzDeg, OffsetFrame.Local)
+        .WithTranslationOffset(Axis.X, dx, OffsetFrame.Local)
+        .WithTranslationOffset(Axis.Y, dy, OffsetFrame.Local)
+        .WithTranslationOffset(Axis.Z, dz, OffsetFrame.Local);
+
+    return ApplyOffset(offset, frame);
+}
+
+private Transform ApplyOffset(
+    Transform offset,
+    OffsetFrame frame)
+{
+    return frame switch
+    {
+        OffsetFrame.Local =>
+            // point -> offset -> this
+            // Offset is applied in this transform's local/source frame.
+            Compose(this, offset),
+
+        OffsetFrame.World =>
+            // point -> this -> offset
+            // Offset is applied in this transform's destination/world frame.
+            Compose(offset, this),
+
+        _ => throw new ArgumentOutOfRangeException(nameof(frame), frame, null)
+    };
+}
