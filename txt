@@ -1,136 +1,67 @@
-public enum OffsetFrame
-{
-    Local,  // apply offset in this transform's local/source frame
-    World   // apply offset in this transform's destination/world frame
-}
+PROGRAM MAIN
+VAR
+    // Trigger this TRUE for one PLC cycle to start the read
+    bReadTrigger    : BOOL := FALSE;
+    bReadTrigOld    : BOOL := FALSE;
+    bReadExecute    : BOOL := FALSE;
 
-public enum Axis
-{
-    X,
-    Y,
-    Z
-}
+    // Modbus TCP read FB
+    fbReadReg       : FB_MBReadRegs;
 
-public Transform WithTranslationOffset(
-    Axis axis,
-    double distance,
-    OffsetFrame frame = OffsetFrame.Local)
-{
-    double dx = 0;
-    double dy = 0;
-    double dz = 0;
+    // PDU connection settings
+    sPduIp          : STRING(15) := '192.168.1.50';
 
-    switch (axis)
-    {
-        case Axis.X:
-            dx = distance;
-            break;
+    // Use 502 for direct PDU connection.
+    // Use 50600, 50601, 50602, etc. for PX4 port-forwarding mode.
+    nPduPort        : UINT := 502;
 
-        case Axis.Y:
-            dy = distance;
-            break;
+    // For direct Modbus TCP device access, Beckhoff says Unit ID can be 16#FF
+    nUnitId         : BYTE := 16#FF;
 
-        case Axis.Z:
-            dz = distance;
-            break;
+    // PX4 register to read
+    nRegisterAddr   : WORD := 2048; // 0x0800
+    nQuantity       : WORD := 1;    // one 16-bit holding register
 
-        default:
-            throw new ArgumentOutOfRangeException(nameof(axis), axis, null);
-    }
+    // Destination buffer
+    arrRegs         : ARRAY[0..0] OF WORD;
 
-    var offset = new Transform(
-        1, 0, 0,
-        0, 1, 0,
-        0, 0, 1,
-        dx, dy, dz,
-        1);
+    // Result
+    wPeripheral1SensorType : WORD;
 
-    return ApplyOffset(offset, frame);
-}
+    // Status
+    bBusy           : BOOL;
+    bError          : BOOL;
+    nErrId          : UDINT;
+    cbRead          : UDINT;
+    bDone           : BOOL;
+END_VAR
 
-public Transform WithRotationOffset(
-    Axis axis,
-    double angleDeg,
-    OffsetFrame frame = OffsetFrame.Local)
-{
-    double angleRad = angleDeg * Math.PI / 180.0;
-    double c = Math.Cos(angleRad);
-    double s = Math.Sin(angleRad);
 
-    Transform offset;
+// Rising edge detection for read command
+bReadExecute := bReadTrigger AND NOT bReadTrigOld;
+bReadTrigOld := bReadTrigger;
 
-    switch (axis)
-    {
-        case Axis.X:
-            offset = new Transform(
-                1, 0,  0,
-                0, c, -s,
-                0, s,  c,
-                0, 0, 0,
-                1);
-            break;
 
-        case Axis.Y:
-            offset = new Transform(
-                 c, 0, s,
-                 0, 1, 0,
-                -s, 0, c,
-                 0, 0, 0,
-                 1);
-            break;
+// Call Modbus read holding registers FB
+fbReadReg(
+    sIPAddr   := sPduIp,
+    nTCPPort  := nPduPort,
+    nUnitID   := nUnitId,
+    nQuantity := nQuantity,
+    nMBAddr   := nRegisterAddr,
+    cbLength  := SIZEOF(arrRegs),
+    pDestAddr := ADR(arrRegs),
+    bExecute  := bReadExecute,
+    tTimeout  := T#2S,
+    bBusy     => bBusy,
+    bError    => bError,
+    nErrId    => nErrId,
+    cbRead    => cbRead
+);
 
-        case Axis.Z:
-            offset = new Transform(
-                c, -s, 0,
-                s,  c, 0,
-                0,  0, 1,
-                0,  0, 0,
-                1);
-            break;
 
-        default:
-            throw new ArgumentOutOfRangeException(nameof(axis), axis, null);
-    }
-
-    return ApplyOffset(offset, frame);
-}
-
-public Transform WithOffset(
-    double dx,
-    double dy,
-    double dz,
-    double rxDeg,
-    double ryDeg,
-    double rzDeg,
-    OffsetFrame frame = OffsetFrame.Local)
-{
-    var offset = Identity
-        .WithRotationOffset(Axis.X, rxDeg, OffsetFrame.Local)
-        .WithRotationOffset(Axis.Y, ryDeg, OffsetFrame.Local)
-        .WithRotationOffset(Axis.Z, rzDeg, OffsetFrame.Local)
-        .WithTranslationOffset(Axis.X, dx, OffsetFrame.Local)
-        .WithTranslationOffset(Axis.Y, dy, OffsetFrame.Local)
-        .WithTranslationOffset(Axis.Z, dz, OffsetFrame.Local);
-
-    return ApplyOffset(offset, frame);
-}
-
-private Transform ApplyOffset(
-    Transform offset,
-    OffsetFrame frame)
-{
-    return frame switch
-    {
-        OffsetFrame.Local =>
-            // point -> offset -> this
-            // Offset is applied in this transform's local/source frame.
-            Compose(this, offset),
-
-        OffsetFrame.World =>
-            // point -> this -> offset
-            // Offset is applied in this transform's destination/world frame.
-            Compose(offset, this),
-
-        _ => throw new ArgumentOutOfRangeException(nameof(frame), frame, null)
-    };
-}
+// Latch result when read finishes successfully
+IF NOT bBusy AND NOT bError AND cbRead = SIZEOF(arrRegs) THEN
+    wPeripheral1SensorType := arrRegs[0];
+    bDone := TRUE;
+END_IF
