@@ -1,67 +1,74 @@
 PROGRAM MAIN
 VAR
-    // Trigger this TRUE for one PLC cycle to start the read
-    bReadTrigger    : BOOL := FALSE;
-    bReadTrigOld    : BOOL := FALSE;
-    bReadExecute    : BOOL := FALSE;
+    // Command inputs
+    bCmdWriteOutlet     : BOOL;     // pulse TRUE for one cycle to command outlet
+    bCmdWriteOutletOld  : BOOL;
+    bWriteExecute       : BOOL;
 
-    // Modbus TCP read FB
-    fbReadReg       : FB_MBReadRegs;
+    bOutletOnCmd        : BOOL := TRUE;  // TRUE = turn outlet ON, FALSE = turn outlet OFF
+    nOutletNumber       : UINT := 1;     // outlet number: 1, 2, 3, ...
 
-    // PDU connection settings
-    sPduIp          : STRING(15) := '192.168.1.50';
+    // Modbus TCP settings
+    sPduIp              : STRING(15) := '192.168.1.50';
 
-    // Use 502 for direct PDU connection.
-    // Use 50600, 50601, 50602, etc. for PX4 port-forwarding mode.
-    nPduPort        : UINT := 502;
+    // Direct PDU = 502
+    // PX4 port-forwarding:
+    // Primary = 50600, Secondary 1 = 50601, Secondary 2 = 50602, etc.
+    nPduPort            : UINT := 502;
 
-    // For direct Modbus TCP device access, Beckhoff says Unit ID can be 16#FF
-    nUnitId         : BYTE := 16#FF;
+    nUnitId             : BYTE := 16#FF;
 
-    // PX4 register to read
-    nRegisterAddr   : WORD := 2048; // 0x0800
-    nQuantity       : WORD := 1;    // one 16-bit holding register
+    // Modbus coil write FB
+    fbWriteOutletCoil   : FB_MBWriteSingleCoil;
 
-    // Destination buffer
-    arrRegs         : ARRAY[0..0] OF WORD;
-
-    // Result
-    wPeripheral1SensorType : WORD;
+    // Calculated Modbus values
+    nCoilAddr           : WORD;
+    nCoilValue          : WORD;
 
     // Status
-    bBusy           : BOOL;
-    bError          : BOOL;
-    nErrId          : UDINT;
-    cbRead          : UDINT;
-    bDone           : BOOL;
+    bBusy               : BOOL;
+    bError              : BOOL;
+    nErrId              : UDINT;
 END_VAR
 
 
-// Rising edge detection for read command
-bReadExecute := bReadTrigger AND NOT bReadTrigOld;
-bReadTrigOld := bReadTrigger;
+// Rising edge command
+bWriteExecute := bCmdWriteOutlet AND NOT bCmdWriteOutletOld;
+bCmdWriteOutletOld := bCmdWriteOutlet;
 
 
-// Call Modbus read holding registers FB
-fbReadReg(
+// Calculate outlet coil address
+// Outlet 1 = 16#0100
+// Outlet 2 = 16#0101
+// Outlet 3 = 16#0102
+IF nOutletNumber >= 1 THEN
+    nCoilAddr := WORD#16#0100 + UINT_TO_WORD(nOutletNumber - 1);
+ELSE
+    nCoilAddr := WORD#16#0100; // fallback to outlet 1
+END_IF;
+
+
+// Modbus coil value
+// Beckhoff FB_MBWriteSingleCoil uses:
+// 16#FF00 = ON
+// 16#0000 = OFF
+IF bOutletOnCmd THEN
+    nCoilValue := WORD#16#FF00;
+ELSE
+    nCoilValue := WORD#16#0000;
+END_IF;
+
+
+// Write outlet relay coil
+fbWriteOutletCoil(
     sIPAddr   := sPduIp,
     nTCPPort  := nPduPort,
     nUnitID   := nUnitId,
-    nQuantity := nQuantity,
-    nMBAddr   := nRegisterAddr,
-    cbLength  := SIZEOF(arrRegs),
-    pDestAddr := ADR(arrRegs),
-    bExecute  := bReadExecute,
+    nMBAddr   := nCoilAddr,
+    nValue    := nCoilValue,
+    bExecute  := bWriteExecute,
     tTimeout  := T#2S,
     bBusy     => bBusy,
     bError    => bError,
-    nErrId    => nErrId,
-    cbRead    => cbRead
+    nErrId    => nErrId
 );
-
-
-// Latch result when read finishes successfully
-IF NOT bBusy AND NOT bError AND cbRead = SIZEOF(arrRegs) THEN
-    wPeripheral1SensorType := arrRegs[0];
-    bDone := TRUE;
-END_IF
