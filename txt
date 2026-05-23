@@ -11,3 +11,10 @@ uConvert.dwValue :=
     SHL(WORD_TO_DWORD(wHigh), 16) OR WORD_TO_DWORD(wLow);
 
 F_ModbusFloatBE_ToReal := uConvert.rValue;
+
+TYPE U_DWORD_REAL :
+UNION
+    dwValue : DWORD;
+    rValue  : REAL;
+END_UNION
+END_TYPE
