@@ -1,20 +1,3 @@
-FUNCTION F_ModbusFloatBE_ToReal : REAL
-VAR_INPUT
-    wHigh : WORD; // first Modbus register, lower address
-    wLow  : WORD; // second Modbus register, higher address
-END_VAR
-VAR
-    uConvert : U_DWORD_REAL;
-END_VAR
-
-uConvert.dwValue :=
-    SHL(WORD_TO_DWORD(wHigh), 16) OR WORD_TO_DWORD(wLow);
-
-F_ModbusFloatBE_ToReal := uConvert.rValue;
-
-TYPE U_DWORD_REAL :
-UNION
-    dwValue : DWORD;
-    rValue  : REAL;
-END_UNION
-END_TYPE
+@everyone Debugged the Zeus Z-comp issue yesterday. We believe the scan-pass stitching transforms are introducing an artificial bow in the middle of the scan, which is resulting in high Z-comps.
+Because the height difference between the front workbench and the pallets exceeds the scanner’s Z range, we’re unable to calibrate the scan-pass stitching transforms using fiducials on the workbench.
+The best path forward is to make a calibration plate to tune the transforms. We’re aiming to have it fabricated by the end of this week and to complete calibration early next week.
