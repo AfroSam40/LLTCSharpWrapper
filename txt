@@ -1,3 +1,35 @@
-@everyone Debugged the Zeus Z-comp issue yesterday. We believe the scan-pass stitching transforms are introducing an artificial bow in the middle of the scan, which is resulting in high Z-comps.
-Because the height difference between the front workbench and the pallets exceeds the scanner’s Z range, we’re unable to calibrate the scan-pass stitching transforms using fiducials on the workbench.
-The best path forward is to make a calibration plate to tune the transforms. We’re aiming to have it fabricated by the end of this week and to complete calibration early next week.
+public void MarkCorrespondingCorners(
+    List<(Vector3 srcCorner, Vector3 dstCorner)> cornerPairs,
+    float radius = 1f,
+    bool clearExisting = true)
+{
+    if (cornerPairs == null || cornerPairs.Count == 0)
+        return;
+
+    Color4[] colors =
+    {
+        new Color4(1f, 0f, 0f, 1f),       // red
+        new Color4(0f, 1f, 0f, 1f),       // green
+        new Color4(0f, 0f, 1f, 1f),       // blue
+        new Color4(1f, 1f, 0f, 1f),       // yellow
+        new Color4(1f, 0f, 1f, 1f),       // magenta
+        new Color4(0f, 1f, 1f, 1f),       // cyan
+        new Color4(1f, 0.5f, 0f, 1f),     // orange
+        new Color4(0.5f, 0f, 1f, 1f)      // purple
+    };
+
+    var markers = new List<(Vector3 pt, Color4 color)>();
+
+    for (int i = 0; i < cornerPairs.Count; i++)
+    {
+        Color4 color = colors[i % colors.Length];
+
+        var pair = cornerPairs[i];
+
+        // Same color means these two corners correspond to each other
+        markers.Add((pair.srcCorner, color));
+        markers.Add((pair.dstCorner, color));
+    }
+
+    SetMarkerSpheres(markers, radius, clearExisting);
+}
