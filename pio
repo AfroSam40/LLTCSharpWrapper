@@ -1,151 +1,252 @@
-public sealed class LineVerticalSample
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
+using System.Windows.Shapes;
+
+public static void ShowVerticalProfilePopup(
+    LineVerticalProfileResult profile,
+    string title = "Vertical Distance Profile")
 {
-    public int Index { get; set; }
-    public double DistanceAlongLine { get; set; }
+    if (profile == null)
+        throw new ArgumentNullException(nameof(profile));
 
-    // Point on requested line at this increment
-    public ScanPointXYZ LinePoint { get; set; }
+    var samples = profile.Samples
+        .Where(s => s.Found && !double.IsNaN(s.VerticalDistance))
+        .ToList();
 
-    // Closest cloud point in XY
-    public ScanPointXYZ ClosestPoint { get; set; }
-
-    // XY distance from LinePoint to ClosestPoint
-    public double ClosestXYDistance { get; set; }
-
-    // Signed vertical difference: cloud Z - line Z
-    public double VerticalDistance { get; set; }
-
-    public bool Found { get; set; }
-}
-
-public sealed class LineVerticalProfileResult
-{
-    public List<LineVerticalSample> Samples { get; set; } = new();
-
-    // Use this to draw/show the sampled line points
-    public PointCloud LineCloud { get; set; } = new();
-
-    // Use this to draw/show the closest cloud points
-    public PointCloud ClosestCloud { get; set; } = new();
-}
-
-public static LineVerticalProfileResult MeasureVerticalDistanceAlongLine(
-    PointCloud cloud,
-    ScanPointXYZ start,
-    ScanPointXYZ end,
-    double increment,
-    double maxSearchRadiusXY = 1.0)
-{
-    if (cloud == null)
-        throw new ArgumentNullException(nameof(cloud));
-
-    if (cloud.Points == null || cloud.Points.Count == 0)
-        throw new ArgumentException("Point cloud is empty.", nameof(cloud));
-
-    if (increment <= 0)
-        throw new ArgumentOutOfRangeException(nameof(increment), "Increment must be greater than zero.");
-
-    var result = new LineVerticalProfileResult();
-
-    double dx = end.X - start.X;
-    double dy = end.Y - start.Y;
-    double dz = end.Z - start.Z;
-
-    double lineLength = Math.Sqrt(dx * dx + dy * dy + dz * dz);
-
-    if (lineLength <= 1e-9)
-        throw new ArgumentException("Start and end points are the same.");
-
-    int sampleCount = (int)Math.Floor(lineLength / increment) + 1;
-
-    double maxRadiusSq = maxSearchRadiusXY * maxSearchRadiusXY;
-
-    for (int i = 0; i <= sampleCount; i++)
+    if (samples.Count == 0)
     {
-        double dist = i * increment;
-        if (dist > lineLength)
-            dist = lineLength;
+        MessageBox.Show("No valid vertical samples found.", title);
+        return;
+    }
 
-        double t = dist / lineLength;
-
-        var linePt = new ScanPointXYZ(
-            start.X + dx * t,
-            start.Y + dy * t,
-            start.Z + dz * t);
-
-        result.LineCloud.Points.Add(linePt);
-
-        ScanPointXYZ closest = default;
-        bool found = false;
-        double bestDistSq = double.PositiveInfinity;
-
-        foreach (var p in cloud.Points)
+    Application.Current.Dispatcher.Invoke(() =>
+    {
+        var window = new Window
         {
-            double px = p.X - linePt.X;
-            double py = p.Y - linePt.Y;
+            Title = title,
+            Width = 1000,
+            Height = 650,
+            WindowStartupLocation = WindowStartupLocation.CenterScreen
+        };
 
-            double dxySq = px * px + py * py;
+        var grid = new Grid();
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(45) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(180) });
 
-            if (dxySq < bestDistSq)
+        double minZ = samples.Min(s => s.VerticalDistance);
+        double maxZ = samples.Max(s => s.VerticalDistance);
+        double avgZ = samples.Average(s => s.VerticalDistance);
+
+        var header = new TextBlock
+        {
+            Text =
+                $"Samples: {samples.Count}    " +
+                $"Min: {minZ:F4}    " +
+                $"Max: {maxZ:F4}    " +
+                $"Avg: {avgZ:F4}",
+            FontSize = 16,
+            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(10),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        Grid.SetRow(header, 0);
+        grid.Children.Add(header);
+
+        var canvas = new Canvas
+        {
+            Background = Brushes.White,
+            Margin = new Thickness(10)
+        };
+
+        Grid.SetRow(canvas, 1);
+        grid.Children.Add(canvas);
+
+        var table = new DataGrid
+        {
+            Margin = new Thickness(10),
+            AutoGenerateColumns = false,
+            IsReadOnly = true,
+            ItemsSource = samples.Select(s => new
             {
-                bestDistSq = dxySq;
-                closest = p;
-                found = true;
-            }
-        }
+                s.Index,
+                Distance = Math.Round(s.DistanceAlongLine, 4),
+                LineX = Math.Round(s.LinePoint.X, 4),
+                LineY = Math.Round(s.LinePoint.Y, 4),
+                LineZ = Math.Round(s.LinePoint.Z, 4),
+                ClosestX = Math.Round(s.ClosestPoint.X, 4),
+                ClosestY = Math.Round(s.ClosestPoint.Y, 4),
+                ClosestZ = Math.Round(s.ClosestPoint.Z, 4),
+                XYError = Math.Round(s.ClosestXYDistance, 4),
+                Vertical = Math.Round(s.VerticalDistance, 4)
+            }).ToList()
+        };
 
-        if (!found || bestDistSq > maxRadiusSq)
+        table.Columns.Add(new DataGridTextColumn { Header = "Index", Binding = new System.Windows.Data.Binding("Index") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Dist", Binding = new System.Windows.Data.Binding("Distance") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Line X", Binding = new System.Windows.Data.Binding("LineX") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Line Y", Binding = new System.Windows.Data.Binding("LineY") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Line Z", Binding = new System.Windows.Data.Binding("LineZ") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Cloud X", Binding = new System.Windows.Data.Binding("ClosestX") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Cloud Y", Binding = new System.Windows.Data.Binding("ClosestY") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Cloud Z", Binding = new System.Windows.Data.Binding("ClosestZ") });
+        table.Columns.Add(new DataGridTextColumn { Header = "XY Err", Binding = new System.Windows.Data.Binding("XYError") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Vertical", Binding = new System.Windows.Data.Binding("Vertical") });
+
+        Grid.SetRow(table, 2);
+        grid.Children.Add(table);
+
+        canvas.SizeChanged += (_, _) => DrawVerticalProfile(canvas, samples);
+
+        window.Content = grid;
+        window.Show();
+    });
+}
+
+private static void DrawVerticalProfile(
+    Canvas canvas,
+    List<LineVerticalSample> samples)
+{
+    canvas.Children.Clear();
+
+    if (samples == null || samples.Count < 2)
+        return;
+
+    double width = canvas.ActualWidth;
+    double height = canvas.ActualHeight;
+
+    if (width <= 20 || height <= 20)
+        return;
+
+    double left = 70;
+    double right = 25;
+    double top = 25;
+    double bottom = 55;
+
+    double plotW = width - left - right;
+    double plotH = height - top - bottom;
+
+    double minX = samples.Min(s => s.DistanceAlongLine);
+    double maxX = samples.Max(s => s.DistanceAlongLine);
+
+    double minY = samples.Min(s => s.VerticalDistance);
+    double maxY = samples.Max(s => s.VerticalDistance);
+
+    if (Math.Abs(maxY - minY) < 1e-9)
+    {
+        maxY += 0.5;
+        minY -= 0.5;
+    }
+
+    double yPad = (maxY - minY) * 0.10;
+    minY -= yPad;
+    maxY += yPad;
+
+    double MapX(double x)
+    {
+        return left + ((x - minX) / (maxX - minX)) * plotW;
+    }
+
+    double MapY(double y)
+    {
+        return top + (1.0 - ((y - minY) / (maxY - minY))) * plotH;
+    }
+
+    // Plot border
+    canvas.Children.Add(new Rectangle
+    {
+        Width = plotW,
+        Height = plotH,
+        Stroke = Brushes.Black,
+        StrokeThickness = 1
+    });
+
+    Canvas.SetLeft(canvas.Children[^1], left);
+    Canvas.SetTop(canvas.Children[^1], top);
+
+    // Zero line
+    if (minY <= 0 && maxY >= 0)
+    {
+        double y0 = MapY(0);
+
+        canvas.Children.Add(new Line
         {
-            result.Samples.Add(new LineVerticalSample
-            {
-                Index = i,
-                DistanceAlongLine = dist,
-                LinePoint = linePt,
-                Found = false,
-                ClosestXYDistance = double.NaN,
-                VerticalDistance = double.NaN
-            });
-
-            continue;
-        }
-
-        double closestXY = Math.Sqrt(bestDistSq);
-        double verticalDistance = closest.Z - linePt.Z;
-
-        result.ClosestCloud.Points.Add(closest);
-
-        result.Samples.Add(new LineVerticalSample
-        {
-            Index = i,
-            DistanceAlongLine = dist,
-            LinePoint = linePt,
-            ClosestPoint = closest,
-            Found = true,
-            ClosestXYDistance = closestXY,
-            VerticalDistance = verticalDistance
+            X1 = left,
+            Y1 = y0,
+            X2 = left + plotW,
+            Y2 = y0,
+            Stroke = Brushes.Gray,
+            StrokeThickness = 1,
+            StrokeDashArray = new DoubleCollection { 4, 4 }
         });
     }
 
-    return result;
+    // Polyline profile
+    var polyline = new Polyline
+    {
+        Stroke = Brushes.Blue,
+        StrokeThickness = 2
+    };
+
+    foreach (var s in samples)
+    {
+        polyline.Points.Add(new Point(
+            MapX(s.DistanceAlongLine),
+            MapY(s.VerticalDistance)));
+    }
+
+    canvas.Children.Add(polyline);
+
+    // Sample points
+    foreach (var s in samples)
+    {
+        double x = MapX(s.DistanceAlongLine);
+        double y = MapY(s.VerticalDistance);
+
+        var dot = new Ellipse
+        {
+            Width = 5,
+            Height = 5,
+            Fill = Brushes.Red
+        };
+
+        Canvas.SetLeft(dot, x - 2.5);
+        Canvas.SetTop(dot, y - 2.5);
+        canvas.Children.Add(dot);
+    }
+
+    // Axis labels
+    AddCanvasText(canvas, "Distance Along Line", left + plotW / 2 - 60, height - 35, 13, Brushes.Black);
+    AddCanvasText(canvas, "Vertical Distance", 8, top + plotH / 2 - 10, 13, Brushes.Black);
+
+    AddCanvasText(canvas, minX.ToString("F2"), left - 10, height - bottom + 8, 12, Brushes.Black);
+    AddCanvasText(canvas, maxX.ToString("F2"), left + plotW - 25, height - bottom + 8, 12, Brushes.Black);
+
+    AddCanvasText(canvas, maxY.ToString("F3"), 10, top - 8, 12, Brushes.Black);
+    AddCanvasText(canvas, minY.ToString("F3"), 10, top + plotH - 8, 12, Brushes.Black);
 }
 
-
-var profile = MeasureVerticalDistanceAlongLine(
-    cloud: finalCloud,
-    start: new ScanPointXYZ(100, 200, 0),
-    end: new ScanPointXYZ(300, 200, 0),
-    increment: 1.0,
-    maxSearchRadiusXY: 0.5);
-
-foreach (var s in profile.Samples)
+private static void AddCanvasText(
+    Canvas canvas,
+    string text,
+    double x,
+    double y,
+    double fontSize,
+    Brush brush)
 {
-    if (!s.Found)
-        continue;
+    var tb = new TextBlock
+    {
+        Text = text,
+        FontSize = fontSize,
+        Foreground = brush
+    };
 
-    Debug.Print(
-        $"S={s.DistanceAlongLine:F3}, " +
-        $"Line=({s.LinePoint.X:F3},{s.LinePoint.Y:F3},{s.LinePoint.Z:F3}), " +
-        $"Closest=({s.ClosestPoint.X:F3},{s.ClosestPoint.Y:F3},{s.ClosestPoint.Z:F3}), " +
-        $"XYDist={s.ClosestXYDistance:F3}, " +
-        $"Vertical={s.VerticalDistance:F3}");
+    Canvas.SetLeft(tb, x);
+    Canvas.SetTop(tb, y);
+    canvas.Children.Add(tb);
 }
