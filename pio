@@ -128,3 +128,24 @@ public static LineVerticalProfileResult MeasureVerticalDistanceAlongLine(
 
     return result;
 }
+
+
+var profile = MeasureVerticalDistanceAlongLine(
+    cloud: finalCloud,
+    start: new ScanPointXYZ(100, 200, 0),
+    end: new ScanPointXYZ(300, 200, 0),
+    increment: 1.0,
+    maxSearchRadiusXY: 0.5);
+
+foreach (var s in profile.Samples)
+{
+    if (!s.Found)
+        continue;
+
+    Debug.Print(
+        $"S={s.DistanceAlongLine:F3}, " +
+        $"Line=({s.LinePoint.X:F3},{s.LinePoint.Y:F3},{s.LinePoint.Z:F3}), " +
+        $"Closest=({s.ClosestPoint.X:F3},{s.ClosestPoint.Y:F3},{s.ClosestPoint.Z:F3}), " +
+        $"XYDist={s.ClosestXYDistance:F3}, " +
+        $"Vertical={s.VerticalDistance:F3}");
+}
