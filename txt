@@ -1,24 +1,117 @@
-.psc-rotate-spin {
-    animation: spin 2s linear infinite !important;
-    transform-origin: center center !important;
-}
+public static void ShowVerticalProfilePopup(
+    LineVerticalProfileResult profile,
+    string title = "Vertical Distance Profile")
+{
+    if (profile == null)
+        throw new ArgumentNullException(nameof(profile));
 
-.psc-rotate-spin *,
-.psc-rotate-spin span,
-.psc-rotate-spin i,
-.psc-rotate-spin svg {
-    display: inline-block !important;
-    animation: spin 2s linear infinite !important;
-    transform-origin: center center !important;
-    transform-box: fill-box !important;
-}
+    var samples = profile.Samples
+        .Where(s => s.Found && !double.IsNaN(s.VerticalDistance))
+        .ToList();
 
-@keyframes spin {
-    from {
-        transform: rotate(0deg);
+    if (samples.Count == 0)
+    {
+        MessageBox.Show("No valid vertical samples found.", title);
+        return;
     }
 
-    to {
-        transform: rotate(360deg);
-    }
+    Application.Current.Dispatcher.Invoke(() =>
+    {
+        var window = new Window
+        {
+            Title = title,
+            Width = 1100,
+            Height = 700,
+            WindowStartupLocation = WindowStartupLocation.CenterScreen
+        };
+
+        var grid = new Grid();
+
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(45) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(70) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(180) });
+
+        double minZ = samples.Min(s => s.VerticalDistance);
+        double maxZ = samples.Max(s => s.VerticalDistance);
+        double avgZ = samples.Average(s => s.VerticalDistance);
+
+        var header = new TextBlock
+        {
+            Text =
+                $"Samples: {samples.Count}    " +
+                $"Min: {minZ:F4}    " +
+                $"Max: {maxZ:F4}    " +
+                $"Avg: {avgZ:F4}",
+            FontSize = 16,
+            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(10),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        Grid.SetRow(header, 0);
+        grid.Children.Add(header);
+
+        var selectedPointText = new TextBlock
+        {
+            Text = "Click a chart point to show XYZ values.",
+            FontSize = 14,
+            FontFamily = new FontFamily("Consolas"),
+            Margin = new Thickness(10, 0, 10, 5),
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        Grid.SetRow(selectedPointText, 1);
+        grid.Children.Add(selectedPointText);
+
+        var canvas = new Canvas
+        {
+            Background = Brushes.White,
+            Margin = new Thickness(10)
+        };
+
+        Grid.SetRow(canvas, 2);
+        grid.Children.Add(canvas);
+
+        var table = new DataGrid
+        {
+            Margin = new Thickness(10),
+            AutoGenerateColumns = false,
+            IsReadOnly = true,
+            ItemsSource = samples.Select(s => new
+            {
+                s.Index,
+                Distance = Math.Round(s.DistanceAlongLine, 4),
+                LineX = Math.Round(s.LinePoint.X, 4),
+                LineY = Math.Round(s.LinePoint.Y, 4),
+                LineZ = Math.Round(s.LinePoint.Z, 4),
+                ClosestX = Math.Round(s.ClosestPoint.X, 4),
+                ClosestY = Math.Round(s.ClosestPoint.Y, 4),
+                ClosestZ = Math.Round(s.ClosestPoint.Z, 4),
+                XYError = Math.Round(s.ClosestXYDistance, 4),
+                Vertical = Math.Round(s.VerticalDistance, 4)
+            }).ToList()
+        };
+
+        table.Columns.Add(new DataGridTextColumn { Header = "Index", Binding = new System.Windows.Data.Binding("Index") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Dist", Binding = new System.Windows.Data.Binding("Distance") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Line X", Binding = new System.Windows.Data.Binding("LineX") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Line Y", Binding = new System.Windows.Data.Binding("LineY") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Line Z", Binding = new System.Windows.Data.Binding("LineZ") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Cloud X", Binding = new System.Windows.Data.Binding("ClosestX") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Cloud Y", Binding = new System.Windows.Data.Binding("ClosestY") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Cloud Z", Binding = new System.Windows.Data.Binding("ClosestZ") });
+        table.Columns.Add(new DataGridTextColumn { Header = "XY Err", Binding = new System.Windows.Data.Binding("XYError") });
+        table.Columns.Add(new DataGridTextColumn { Header = "Vertical", Binding = new System.Windows.Data.Binding("Vertical") });
+
+        Grid.SetRow(table, 3);
+        grid.Children.Add(table);
+
+        canvas.SizeChanged += (_, _) =>
+            DrawVerticalProfile(canvas, samples, selectedPointText);
+
+        window.Content = grid;
+        window.Show();
+    });
 }
