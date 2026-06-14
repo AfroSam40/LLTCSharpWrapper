@@ -1,265 +1,206 @@
-public static void ShowVerticalProfilePopup(
-    LineVerticalProfileResult profile,
-    string title = "Vertical Distance Profile")
+// Smooth best-fit polynomial curve
+if (showBestFitLine && samples.Count >= bestFitDegree + 1)
 {
-    if (profile == null)
-        throw new ArgumentNullException(nameof(profile));
-
-    var samples = profile.Samples
-        .Where(s => s.Found && !double.IsNaN(s.VerticalDistance))
-        .ToList();
-
-    if (samples.Count == 0)
+    try
     {
-        MessageBox.Show("No valid vertical samples found.", title);
-        return;
+        var fit = FitPolynomialNormalized(
+            samples.Select(s => s.DistanceAlongLine).ToArray(),
+            samples.Select(s => s.VerticalDistance).ToArray(),
+            bestFitDegree);
+
+        var bestFitLine = new Polyline
+        {
+            Stroke = Brushes.DarkOrange,
+            StrokeThickness = 3,
+            StrokeDashArray = new DoubleCollection { 8, 4 }
+        };
+
+        int fitPointCount = 300;
+
+        for (int i = 0; i < fitPointCount; i++)
+        {
+            double t = (double)i / (fitPointCount - 1);
+            double xVal = minX + t * (maxX - minX);
+            double yVal = EvaluatePolynomialNormalized(fit, xVal);
+
+            bestFitLine.Points.Add(new Point(
+                MapX(xVal),
+                MapY(yVal)));
+        }
+
+        canvas.Children.Add(bestFitLine);
+
+        AddCanvasText(
+            canvas,
+            $"Best fit degree {bestFitDegree}",
+            left + plotW - 160,
+            top + 8,
+            12,
+            Brushes.DarkOrange);
     }
-
-    Application.Current.Dispatcher.Invoke(() =>
+    catch
     {
-        var window = new Window
-        {
-            Title = title,
-            Width = 1100,
-            Height = 700,
-            WindowStartupLocation = WindowStartupLocation.CenterScreen
-        };
-
-        var grid = new Grid();
-
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(45) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(70) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(180) });
-
-        double minZ = samples.Min(s => s.VerticalDistance);
-        double maxZ = samples.Max(s => s.VerticalDistance);
-        double avgZ = samples.Average(s => s.VerticalDistance);
-
-        var header = new TextBlock
-        {
-            Text =
-                $"Samples: {samples.Count}    " +
-                $"Min: {minZ:F4}    " +
-                $"Max: {maxZ:F4}    " +
-                $"Avg: {avgZ:F4}",
-            FontSize = 16,
-            FontWeight = FontWeights.Bold,
-            Margin = new Thickness(10),
-            VerticalAlignment = VerticalAlignment.Center
-        };
-
-        Grid.SetRow(header, 0);
-        grid.Children.Add(header);
-
-        var selectedPointText = new TextBlock
-        {
-            Text = "Click a chart point to show XYZ values.",
-            FontSize = 14,
-            FontFamily = new FontFamily("Consolas"),
-            Margin = new Thickness(10, 0, 10, 5),
-            TextWrapping = TextWrapping.Wrap,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-
-        Grid.SetRow(selectedPointText, 1);
-        grid.Children.Add(selectedPointText);
-
-        var canvas = new Canvas
-        {
-            Background = Brushes.White,
-            Margin = new Thickness(10)
-        };
-
-        Grid.SetRow(canvas, 2);
-        grid.Children.Add(canvas);
-
-        var table = new DataGrid
-        {
-            Margin = new Thickness(10),
-            AutoGenerateColumns = false,
-            IsReadOnly = true,
-            ItemsSource = samples.Select(s => new
-            {
-                s.Index,
-                Distance = Math.Round(s.DistanceAlongLine, 4),
-                LineX = Math.Round(s.LinePoint.X, 4),
-                LineY = Math.Round(s.LinePoint.Y, 4),
-                LineZ = Math.Round(s.LinePoint.Z, 4),
-                ClosestX = Math.Round(s.ClosestPoint.X, 4),
-                ClosestY = Math.Round(s.ClosestPoint.Y, 4),
-                ClosestZ = Math.Round(s.ClosestPoint.Z, 4),
-                XYError = Math.Round(s.ClosestXYDistance, 4),
-                Vertical = Math.Round(s.VerticalDistance, 4)
-            }).ToList()
-        };
-
-        table.Columns.Add(new DataGridTextColumn { Header = "Index", Binding = new System.Windows.Data.Binding("Index") });
-        table.Columns.Add(new DataGridTextColumn { Header = "Dist", Binding = new System.Windows.Data.Binding("Distance") });
-        table.Columns.Add(new DataGridTextColumn { Header = "Line X", Binding = new System.Windows.Data.Binding("LineX") });
-        table.Columns.Add(new DataGridTextColumn { Header = "Line Y", Binding = new System.Windows.Data.Binding("LineY") });
-        table.Columns.Add(new DataGridTextColumn { Header = "Line Z", Binding = new System.Windows.Data.Binding("LineZ") });
-        table.Columns.Add(new DataGridTextColumn { Header = "Cloud X", Binding = new System.Windows.Data.Binding("ClosestX") });
-        table.Columns.Add(new DataGridTextColumn { Header = "Cloud Y", Binding = new System.Windows.Data.Binding("ClosestY") });
-        table.Columns.Add(new DataGridTextColumn { Header = "Cloud Z", Binding = new System.Windows.Data.Binding("ClosestZ") });
-        table.Columns.Add(new DataGridTextColumn { Header = "XY Err", Binding = new System.Windows.Data.Binding("XYError") });
-        table.Columns.Add(new DataGridTextColumn { Header = "Vertical", Binding = new System.Windows.Data.Binding("Vertical") });
-
-        Grid.SetRow(table, 3);
-        grid.Children.Add(table);
-
-        canvas.SizeChanged += (_, _) =>
-            DrawVerticalProfile(canvas, samples, selectedPointText);
-
-        window.Content = grid;
-        window.Show();
-    });
+        // Do not fail the whole popup if fit fails.
+    }
 }
 
 
 
-private static void DrawVerticalProfile(
-    Canvas canvas,
-    List<LineVerticalSample> samples,
-    TextBlock selectedPointText)
+
+±++++++++++++
+
+
+private sealed class PolynomialFit
 {
-    canvas.Children.Clear();
+    public double[] Coefficients { get; set; } = Array.Empty<double>();
+    public double XCenter { get; set; }
+    public double XScale { get; set; }
+}
 
-    if (samples == null || samples.Count < 2)
-        return;
+private static PolynomialFit FitPolynomialNormalized(
+    double[] x,
+    double[] y,
+    int degree)
+{
+    if (x == null || y == null)
+        throw new ArgumentNullException();
 
-    double width = canvas.ActualWidth;
-    double height = canvas.ActualHeight;
+    if (x.Length != y.Length)
+        throw new ArgumentException("X and Y arrays must have the same length.");
 
-    if (width <= 20 || height <= 20)
-        return;
+    if (x.Length < degree + 1)
+        throw new ArgumentException("Not enough points for requested polynomial degree.");
 
-    double left = 70;
-    double right = 25;
-    double top = 25;
-    double bottom = 55;
+    if (degree < 1)
+        throw new ArgumentOutOfRangeException(nameof(degree));
 
-    double plotW = width - left - right;
-    double plotH = height - top - bottom;
+    double xMin = x.Min();
+    double xMax = x.Max();
+    double xCenter = 0.5 * (xMin + xMax);
+    double xScale = 0.5 * (xMax - xMin);
 
-    double minX = samples.Min(s => s.DistanceAlongLine);
-    double maxX = samples.Max(s => s.DistanceAlongLine);
+    if (Math.Abs(xScale) < 1e-12)
+        xScale = 1.0;
 
-    double minY = samples.Min(s => s.VerticalDistance);
-    double maxY = samples.Max(s => s.VerticalDistance);
+    int n = x.Length;
+    int m = degree + 1;
 
-    if (Math.Abs(maxX - minX) < 1e-9)
+    // Normal equations:
+    // A^T A c = A^T y
+    double[,] ata = new double[m, m];
+    double[] aty = new double[m];
+
+    for (int i = 0; i < n; i++)
     {
-        maxX += 0.5;
-        minX -= 0.5;
+        double xn = (x[i] - xCenter) / xScale;
+
+        double[] powers = new double[m];
+        powers[0] = 1.0;
+
+        for (int p = 1; p < m; p++)
+            powers[p] = powers[p - 1] * xn;
+
+        for (int row = 0; row < m; row++)
+        {
+            aty[row] += powers[row] * y[i];
+
+            for (int col = 0; col < m; col++)
+                ata[row, col] += powers[row] * powers[col];
+        }
     }
 
-    if (Math.Abs(maxY - minY) < 1e-9)
-    {
-        maxY += 0.5;
-        minY -= 0.5;
-    }
+    double[] coeffs = SolveLinearSystem(ata, aty);
 
-    double yPad = (maxY - minY) * 0.10;
-    minY -= yPad;
-    maxY += yPad;
-
-    double MapX(double x)
+    return new PolynomialFit
     {
-        return left + ((x - minX) / (maxX - minX)) * plotW;
-    }
-
-    double MapY(double y)
-    {
-        return top + (1.0 - ((y - minY) / (maxY - minY))) * plotH;
-    }
-
-    var border = new Rectangle
-    {
-        Width = plotW,
-        Height = plotH,
-        Stroke = Brushes.Black,
-        StrokeThickness = 1
+        Coefficients = coeffs,
+        XCenter = xCenter,
+        XScale = xScale
     };
+}
 
-    Canvas.SetLeft(border, left);
-    Canvas.SetTop(border, top);
-    canvas.Children.Add(border);
+private static double EvaluatePolynomialNormalized(
+    PolynomialFit fit,
+    double x)
+{
+    double xn = (x - fit.XCenter) / fit.XScale;
 
-    if (minY <= 0 && maxY >= 0)
+    // Horner evaluation
+    double y = 0.0;
+
+    for (int i = fit.Coefficients.Length - 1; i >= 0; i--)
+        y = y * xn + fit.Coefficients[i];
+
+    return y;
+}
+
+private static double[] SolveLinearSystem(
+    double[,] a,
+    double[] b)
+{
+    int n = b.Length;
+
+    double[,] m = new double[n, n + 1];
+
+    for (int r = 0; r < n; r++)
     {
-        double y0 = MapY(0);
+        for (int c = 0; c < n; c++)
+            m[r, c] = a[r, c];
 
-        canvas.Children.Add(new Line
-        {
-            X1 = left,
-            Y1 = y0,
-            X2 = left + plotW,
-            Y2 = y0,
-            Stroke = Brushes.Gray,
-            StrokeThickness = 1,
-            StrokeDashArray = new DoubleCollection { 4, 4 }
-        });
+        m[r, n] = b[r];
     }
 
-    var polyline = new Polyline
+    // Gaussian elimination with partial pivoting
+    for (int pivot = 0; pivot < n; pivot++)
     {
-        Stroke = Brushes.Blue,
-        StrokeThickness = 2
-    };
+        int bestRow = pivot;
+        double bestAbs = Math.Abs(m[pivot, pivot]);
 
-    foreach (var s in samples)
-    {
-        polyline.Points.Add(new Point(
-            MapX(s.DistanceAlongLine),
-            MapY(s.VerticalDistance)));
+        for (int r = pivot + 1; r < n; r++)
+        {
+            double abs = Math.Abs(m[r, pivot]);
+
+            if (abs > bestAbs)
+            {
+                bestAbs = abs;
+                bestRow = r;
+            }
+        }
+
+        if (bestAbs < 1e-12)
+            throw new InvalidOperationException("Polynomial fit matrix is singular.");
+
+        if (bestRow != pivot)
+        {
+            for (int c = pivot; c <= n; c++)
+            {
+                double temp = m[pivot, c];
+                m[pivot, c] = m[bestRow, c];
+                m[bestRow, c] = temp;
+            }
+        }
+
+        double pivotValue = m[pivot, pivot];
+
+        for (int c = pivot; c <= n; c++)
+            m[pivot, c] /= pivotValue;
+
+        for (int r = 0; r < n; r++)
+        {
+            if (r == pivot)
+                continue;
+
+            double factor = m[r, pivot];
+
+            for (int c = pivot; c <= n; c++)
+                m[r, c] -= factor * m[pivot, c];
+        }
     }
 
-    canvas.Children.Add(polyline);
+    double[] x = new double[n];
 
-    foreach (var s in samples)
-    {
-        double x = MapX(s.DistanceAlongLine);
-        double y = MapY(s.VerticalDistance);
+    for (int i = 0; i < n; i++)
+        x[i] = m[i, n];
 
-        var dot = new Ellipse
-        {
-            Width = 9,
-            Height = 9,
-            Fill = Brushes.Red,
-            Stroke = Brushes.Black,
-            StrokeThickness = 1,
-            Cursor = Cursors.Hand,
-            ToolTip =
-                $"Index: {s.Index}\n" +
-                $"Distance: {s.DistanceAlongLine:F4}\n" +
-                $"Line XYZ: ({s.LinePoint.X:F4}, {s.LinePoint.Y:F4}, {s.LinePoint.Z:F4})\n" +
-                $"Cloud XYZ: ({s.ClosestPoint.X:F4}, {s.ClosestPoint.Y:F4}, {s.ClosestPoint.Z:F4})\n" +
-                $"Vertical: {s.VerticalDistance:F4}"
-        };
-
-        dot.MouseLeftButtonDown += (_, e) =>
-        {
-            selectedPointText.Text =
-                $"Selected index {s.Index} | Dist={s.DistanceAlongLine:F4}\n" +
-                $"Line XYZ:  X={s.LinePoint.X:F4}, Y={s.LinePoint.Y:F4}, Z={s.LinePoint.Z:F4}\n" +
-                $"Cloud XYZ: X={s.ClosestPoint.X:F4}, Y={s.ClosestPoint.Y:F4}, Z={s.ClosestPoint.Z:F4} | " +
-                $"XY Err={s.ClosestXYDistance:F4}, Vertical={s.VerticalDistance:F4}";
-
-            e.Handled = true;
-        };
-
-        Canvas.SetLeft(dot, x - 4.5);
-        Canvas.SetTop(dot, y - 4.5);
-        canvas.Children.Add(dot);
-    }
-
-    AddCanvasText(canvas, "Distance Along Line", left + plotW / 2 - 60, height - 35, 13, Brushes.Black);
-    AddCanvasText(canvas, "Vertical Distance", 8, top + plotH / 2 - 10, 13, Brushes.Black);
-
-    AddCanvasText(canvas, minX.ToString("F2"), left - 10, height - bottom + 8, 12, Brushes.Black);
-    AddCanvasText(canvas, maxX.ToString("F2"), left + plotW - 25, height - bottom + 8, 12, Brushes.Black);
-
-    AddCanvasText(canvas, maxY.ToString("F3"), 10, top - 8, 12, Brushes.Black);
-    AddCanvasText(canvas, minY.ToString("F3"), 10, top + plotH - 8, 12, Brushes.Black);
+    return x;
 }
