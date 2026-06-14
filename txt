@@ -115,3 +115,151 @@ public static void ShowVerticalProfilePopup(
         window.Show();
     });
 }
+
+
+
+private static void DrawVerticalProfile(
+    Canvas canvas,
+    List<LineVerticalSample> samples,
+    TextBlock selectedPointText)
+{
+    canvas.Children.Clear();
+
+    if (samples == null || samples.Count < 2)
+        return;
+
+    double width = canvas.ActualWidth;
+    double height = canvas.ActualHeight;
+
+    if (width <= 20 || height <= 20)
+        return;
+
+    double left = 70;
+    double right = 25;
+    double top = 25;
+    double bottom = 55;
+
+    double plotW = width - left - right;
+    double plotH = height - top - bottom;
+
+    double minX = samples.Min(s => s.DistanceAlongLine);
+    double maxX = samples.Max(s => s.DistanceAlongLine);
+
+    double minY = samples.Min(s => s.VerticalDistance);
+    double maxY = samples.Max(s => s.VerticalDistance);
+
+    if (Math.Abs(maxX - minX) < 1e-9)
+    {
+        maxX += 0.5;
+        minX -= 0.5;
+    }
+
+    if (Math.Abs(maxY - minY) < 1e-9)
+    {
+        maxY += 0.5;
+        minY -= 0.5;
+    }
+
+    double yPad = (maxY - minY) * 0.10;
+    minY -= yPad;
+    maxY += yPad;
+
+    double MapX(double x)
+    {
+        return left + ((x - minX) / (maxX - minX)) * plotW;
+    }
+
+    double MapY(double y)
+    {
+        return top + (1.0 - ((y - minY) / (maxY - minY))) * plotH;
+    }
+
+    var border = new Rectangle
+    {
+        Width = plotW,
+        Height = plotH,
+        Stroke = Brushes.Black,
+        StrokeThickness = 1
+    };
+
+    Canvas.SetLeft(border, left);
+    Canvas.SetTop(border, top);
+    canvas.Children.Add(border);
+
+    if (minY <= 0 && maxY >= 0)
+    {
+        double y0 = MapY(0);
+
+        canvas.Children.Add(new Line
+        {
+            X1 = left,
+            Y1 = y0,
+            X2 = left + plotW,
+            Y2 = y0,
+            Stroke = Brushes.Gray,
+            StrokeThickness = 1,
+            StrokeDashArray = new DoubleCollection { 4, 4 }
+        });
+    }
+
+    var polyline = new Polyline
+    {
+        Stroke = Brushes.Blue,
+        StrokeThickness = 2
+    };
+
+    foreach (var s in samples)
+    {
+        polyline.Points.Add(new Point(
+            MapX(s.DistanceAlongLine),
+            MapY(s.VerticalDistance)));
+    }
+
+    canvas.Children.Add(polyline);
+
+    foreach (var s in samples)
+    {
+        double x = MapX(s.DistanceAlongLine);
+        double y = MapY(s.VerticalDistance);
+
+        var dot = new Ellipse
+        {
+            Width = 9,
+            Height = 9,
+            Fill = Brushes.Red,
+            Stroke = Brushes.Black,
+            StrokeThickness = 1,
+            Cursor = Cursors.Hand,
+            ToolTip =
+                $"Index: {s.Index}\n" +
+                $"Distance: {s.DistanceAlongLine:F4}\n" +
+                $"Line XYZ: ({s.LinePoint.X:F4}, {s.LinePoint.Y:F4}, {s.LinePoint.Z:F4})\n" +
+                $"Cloud XYZ: ({s.ClosestPoint.X:F4}, {s.ClosestPoint.Y:F4}, {s.ClosestPoint.Z:F4})\n" +
+                $"Vertical: {s.VerticalDistance:F4}"
+        };
+
+        dot.MouseLeftButtonDown += (_, e) =>
+        {
+            selectedPointText.Text =
+                $"Selected index {s.Index} | Dist={s.DistanceAlongLine:F4}\n" +
+                $"Line XYZ:  X={s.LinePoint.X:F4}, Y={s.LinePoint.Y:F4}, Z={s.LinePoint.Z:F4}\n" +
+                $"Cloud XYZ: X={s.ClosestPoint.X:F4}, Y={s.ClosestPoint.Y:F4}, Z={s.ClosestPoint.Z:F4} | " +
+                $"XY Err={s.ClosestXYDistance:F4}, Vertical={s.VerticalDistance:F4}";
+
+            e.Handled = true;
+        };
+
+        Canvas.SetLeft(dot, x - 4.5);
+        Canvas.SetTop(dot, y - 4.5);
+        canvas.Children.Add(dot);
+    }
+
+    AddCanvasText(canvas, "Distance Along Line", left + plotW / 2 - 60, height - 35, 13, Brushes.Black);
+    AddCanvasText(canvas, "Vertical Distance", 8, top + plotH / 2 - 10, 13, Brushes.Black);
+
+    AddCanvasText(canvas, minX.ToString("F2"), left - 10, height - bottom + 8, 12, Brushes.Black);
+    AddCanvasText(canvas, maxX.ToString("F2"), left + plotW - 25, height - bottom + 8, 12, Brushes.Black);
+
+    AddCanvasText(canvas, maxY.ToString("F3"), 10, top - 8, 12, Brushes.Black);
+    AddCanvasText(canvas, minY.ToString("F3"), 10, top + plotH - 8, 12, Brushes.Black);
+}
