@@ -1,1 +1,56 @@
-& "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --kiosk "https://www.contoso.com" --edge-kiosk-type=fullscreen
+public (double rxDeg, double ryDeg, double rzDeg) GetEulerAnglesDeg()
+{
+    // Rotation order assumed:
+    // R = Rz * Ry * Rx
+    //
+    // rx = roll  about X
+    // ry = pitch about Y
+    // rz = yaw   about Z
+
+    double r00n = r00;
+    double r01n = r01;
+    double r02n = r02;
+
+    double r10n = r10;
+    double r11n = r11;
+    double r12n = r12;
+
+    double r20n = r20;
+    double r21n = r21;
+    double r22n = r22;
+
+    // Optional cleanup in case numerical error makes values slightly invalid
+    double Clamp(double v, double min, double max)
+    {
+        if (v < min) return min;
+        if (v > max) return max;
+        return v;
+    }
+
+    double ryRad = Math.Asin(Clamp(-r20n, -1.0, 1.0));
+
+    double cosRy = Math.Cos(ryRad);
+
+    double rxRad;
+    double rzRad;
+
+    if (Math.Abs(cosRy) > 1e-9)
+    {
+        rxRad = Math.Atan2(r21n, r22n);
+        rzRad = Math.Atan2(r10n, r00n);
+    }
+    else
+    {
+        // Gimbal lock case
+        rxRad = 0.0;
+        rzRad = Math.Atan2(-r01n, r11n);
+    }
+
+    const double radToDeg = 180.0 / Math.PI;
+
+    return (
+        rxRad * radToDeg,
+        ryRad * radToDeg,
+        rzRad * radToDeg
+    );
+}
