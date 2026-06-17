@@ -1,56 +1,62 @@
-public (double rxDeg, double ryDeg, double rzDeg) GetEulerAnglesDeg()
+using System;
+using System.Data;
+using System.Globalization;
+using System.Text;
+using System.Windows;
+
+public static void CopyDataTableToClipboard(
+    DataTable table,
+    bool includeHeaders = true)
 {
-    // Rotation order assumed:
-    // R = Rz * Ry * Rx
-    //
-    // rx = roll  about X
-    // ry = pitch about Y
-    // rz = yaw   about Z
+    if (table == null)
+        throw new ArgumentNullException(nameof(table));
 
-    double r00n = r00;
-    double r01n = r01;
-    double r02n = r02;
+    var sb = new StringBuilder();
 
-    double r10n = r10;
-    double r11n = r11;
-    double r12n = r12;
-
-    double r20n = r20;
-    double r21n = r21;
-    double r22n = r22;
-
-    // Optional cleanup in case numerical error makes values slightly invalid
-    double Clamp(double v, double min, double max)
+    if (includeHeaders)
     {
-        if (v < min) return min;
-        if (v > max) return max;
-        return v;
+        for (int c = 0; c < table.Columns.Count; c++)
+        {
+            if (c > 0)
+                sb.Append('\t');
+
+            sb.Append(CleanForExcel(table.Columns[c].ColumnName));
+        }
+
+        sb.AppendLine();
     }
 
-    double ryRad = Math.Asin(Clamp(-r20n, -1.0, 1.0));
-
-    double cosRy = Math.Cos(ryRad);
-
-    double rxRad;
-    double rzRad;
-
-    if (Math.Abs(cosRy) > 1e-9)
+    foreach (DataRow row in table.Rows)
     {
-        rxRad = Math.Atan2(r21n, r22n);
-        rzRad = Math.Atan2(r10n, r00n);
-    }
-    else
-    {
-        // Gimbal lock case
-        rxRad = 0.0;
-        rzRad = Math.Atan2(-r01n, r11n);
+        for (int c = 0; c < table.Columns.Count; c++)
+        {
+            if (c > 0)
+                sb.Append('\t');
+
+            object value = row[c];
+
+            string text = value == DBNull.Value || value == null
+                ? ""
+                : Convert.ToString(value, CultureInfo.InvariantCulture);
+
+            sb.Append(CleanForExcel(text));
+        }
+
+        sb.AppendLine();
     }
 
-    const double radToDeg = 180.0 / Math.PI;
+    Clipboard.SetText(sb.ToString(), TextDataFormat.UnicodeText);
+}
 
-    return (
-        rxRad * radToDeg,
-        ryRad * radToDeg,
-        rzRad * radToDeg
-    );
+private static string CleanForExcel(string text)
+{
+    if (string.IsNullOrEmpty(text))
+        return "";
+
+    // Prevent breaking Excel columns/rows
+    return text
+        .Replace("\t", " ")
+        .Replace("\r\n", " ")
+        .Replace("\r", " ")
+        .Replace("\n", " ");
 }
