@@ -1,62 +1,102 @@
-using System;
-using System.Data;
-using System.Globalization;
-using System.Text;
-using System.Windows;
-
-public static void CopyDataTableToClipboard(
-    DataTable table,
-    bool includeHeaders = true)
+public enum Axis
 {
-    if (table == null)
-        throw new ArgumentNullException(nameof(table));
-
-    var sb = new StringBuilder();
-
-    if (includeHeaders)
-    {
-        for (int c = 0; c < table.Columns.Count; c++)
-        {
-            if (c > 0)
-                sb.Append('\t');
-
-            sb.Append(CleanForExcel(table.Columns[c].ColumnName));
-        }
-
-        sb.AppendLine();
-    }
-
-    foreach (DataRow row in table.Rows)
-    {
-        for (int c = 0; c < table.Columns.Count; c++)
-        {
-            if (c > 0)
-                sb.Append('\t');
-
-            object value = row[c];
-
-            string text = value == DBNull.Value || value == null
-                ? ""
-                : Convert.ToString(value, CultureInfo.InvariantCulture);
-
-            sb.Append(CleanForExcel(text));
-        }
-
-        sb.AppendLine();
-    }
-
-    Clipboard.SetText(sb.ToString(), TextDataFormat.UnicodeText);
+    X,
+    Y,
+    Z
 }
 
-private static string CleanForExcel(string text)
+public enum RotationFrame
 {
-    if (string.IsNullOrEmpty(text))
-        return "";
+    Local,  // rotate about transform/source axis
+    World   // rotate about world/dst axis
+}
 
-    // Prevent breaking Excel columns/rows
-    return text
-        .Replace("\t", " ")
-        .Replace("\r\n", " ")
-        .Replace("\r", " ")
-        .Replace("\n", " ");
+
+public Transform AddRotation(
+    Axis axis,
+    double angleDeg,
+    RotationFrame frame = RotationFrame.Local,
+    bool keepTranslationFixed = true)
+{
+    double a = angleDeg * Math.PI / 180.0;
+    double c = Math.Cos(a);
+    double s = Math.Sin(a);
+
+    Transform rot;
+
+    switch (axis)
+    {
+        case Axis.X:
+            rot = new Transform(
+                1, 0,  0,
+                0, c, -s,
+                0, s,  c,
+                0, 0, 0,
+                1);
+            break;
+
+        case Axis.Y:
+            rot = new Transform(
+                 c, 0, s,
+                 0, 1, 0,
+                -s, 0, c,
+                 0, 0, 0,
+                 1);
+            break;
+
+        case Axis.Z:
+            rot = new Transform(
+                c, -s, 0,
+                s,  c, 0,
+                0,  0, 1,
+                0,  0, 0,
+                1);
+            break;
+
+        default:
+            throw new ArgumentOutOfRangeException(nameof(axis), axis, null);
+    }
+
+    Transform result;
+
+    if (frame == RotationFrame.Local)
+    {
+        // Local/source-axis rotation:
+        // pOut = this * rot * pIn
+        result = Compose(this, rot);
+    }
+    else
+    {
+        if (keepTranslationFixed)
+        {
+            // World/dst-axis orientation rotation, but do not rotate the transform origin.
+            // Rnew = rot * R
+            result = new Transform(
+                rot.r00 * r00 + rot.r01 * r10 + rot.r02 * r20,
+                rot.r00 * r01 + rot.r01 * r11 + rot.r02 * r21,
+                rot.r00 * r02 + rot.r01 * r12 + rot.r02 * r22,
+
+                rot.r10 * r00 + rot.r11 * r10 + rot.r12 * r20,
+                rot.r10 * r01 + rot.r11 * r11 + rot.r12 * r21,
+                rot.r10 * r02 + rot.r11 * r12 + rot.r12 * r22,
+
+                rot.r20 * r00 + rot.r21 * r10 + rot.r22 * r20,
+                rot.r20 * r01 + rot.r21 * r11 + rot.r22 * r21,
+                rot.r20 * r02 + rot.r21 * r12 + rot.r22 * r22,
+
+                tx,
+                ty,
+                tz,
+                this.s);
+        }
+        else
+        {
+            // World/dst-axis rotation about world origin:
+            // pOut = rot * this * pIn
+            // This also rotates tx, ty, tz.
+            result = Compose(rot, this);
+        }
+    }
+
+    return result;
 }
