@@ -1,9 +1,52 @@
-dgSrc.ItemsSource = null;
-dgDst.ItemsSource = null;
-dgSrc2.ItemsSource = null;
-dgDst2.ItemsSource = null;
+using System;
+using System.Globalization;
+using System.IO;
+using System.Windows.Media.Media3D;
 
-dgSrc.ItemsSource = srcDt.DefaultView;
-dgDst.ItemsSource = dstDt.DefaultView;
-dgSrc2.ItemsSource = srcDt2.DefaultView;
-dgDst2.ItemsSource = dstDt2.DefaultView;
+public static Point3DCollection LoadXyzFileToPoint3DCollection(string filePath)
+{
+    if (string.IsNullOrWhiteSpace(filePath))
+        throw new ArgumentException("File path is null or empty.", nameof(filePath));
+
+    if (!File.Exists(filePath))
+        throw new FileNotFoundException("XYZ file not found.", filePath);
+
+    var points = new Point3DCollection();
+    var culture = CultureInfo.InvariantCulture;
+
+    int lineNumber = 0;
+
+    foreach (string rawLine in File.ReadLines(filePath))
+    {
+        lineNumber++;
+
+        string line = rawLine.Trim();
+
+        if (string.IsNullOrWhiteSpace(line))
+            continue;
+
+        // Skip common comment/header lines
+        if (line.StartsWith("#") || line.StartsWith("//"))
+            continue;
+
+        // Handles space, tab, comma, semicolon separated files
+        string[] parts = line.Split(
+            new[] { ' ', '\t', ',', ';' },
+            StringSplitOptions.RemoveEmptyEntries);
+
+        if (parts.Length < 3)
+            continue;
+
+        if (!double.TryParse(parts[0], NumberStyles.Float, culture, out double x) ||
+            !double.TryParse(parts[1], NumberStyles.Float, culture, out double y) ||
+            !double.TryParse(parts[2], NumberStyles.Float, culture, out double z))
+        {
+            throw new FormatException(
+                $"Invalid XYZ value at line {lineNumber}: \"{rawLine}\"");
+        }
+
+        points.Add(new Point3D(x, y, z));
+    }
+
+    return points;
+}
