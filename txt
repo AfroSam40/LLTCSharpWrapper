@@ -1,56 +1,10 @@
-using System;
-using System.Numerics;
-
-public static PointCloud InvertZResidualAboutPlane(
-    PointCloud cloud,
-    ScanPointXYZ planePoint,
-    Vector3 planeNormal)
+public static Transform AddZInversionInDstFrame(
+    Transform originalTransform,
+    double zRef)
 {
-    if (cloud == null)
-        throw new ArgumentNullException(nameof(cloud));
+    Transform zMirror = MirrorZAboutWorldZ(zRef);
 
-    if (cloud.Points == null)
-        throw new ArgumentException("Point cloud has no points.", nameof(cloud));
-
-    Vector3 n = Vector3.Normalize(planeNormal);
-
-    if (Math.Abs(n.Z) < 1e-9)
-        throw new ArgumentException("Plane normal Z is too close to zero. Cannot solve plane Z at XY.");
-
-    var result = new PointCloud();
-
-    foreach (var p in cloud.Points)
-    {
-        double zPlane = GetPlaneZAtXY(
-            p.X,
-            p.Y,
-            planePoint,
-            n);
-
-        double newZ = 2.0 * zPlane - p.Z;
-
-        result.Points.Add(new ScanPointXYZ(
-            p.X,
-            p.Y,
-            newZ));
-    }
-
-    return result;
-}
-
-private static double GetPlaneZAtXY(
-    double x,
-    double y,
-    ScanPointXYZ planePoint,
-    Vector3 n)
-{
-    // Plane:
-    // n.X * (x - x0) + n.Y * (y - y0) + n.Z * (z - z0) = 0
-    //
-    // Solve for z:
-    // z = z0 - (nx*(x-x0) + ny*(y-y0)) / nz
-
-    return planePoint.Z -
-           ((double)n.X * (x - planePoint.X) +
-            (double)n.Y * (y - planePoint.Y)) / n.Z;
+    // Mirror after original transform.
+    // This means inversion happens in dst/global frame.
+    return Compose(zMirror, originalTransform);
 }
