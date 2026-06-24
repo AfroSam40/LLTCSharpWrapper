@@ -8,3 +8,19 @@ public static Transform AddZInversionInDstFrame(
     // This means inversion happens in dst/global frame.
     return Compose(zMirror, originalTransform);
 }
+
+public static Transform MirrorZAboutWorldZ(double zRef)
+{
+    // Reflect across horizontal world plane Z = zRef
+    //
+    // x' = x
+    // y' = y
+    // z' = 2*zRef - z
+
+    return new Transform(
+         1, 0,  0,
+         0, 1,  0,
+         0, 0, -1,
+         0, 0, 2.0 * zRef,
+         1);
+}
