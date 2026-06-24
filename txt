@@ -1,7 +1,56 @@
-public static double RotationDeterminant(Transform t)
+using System;
+using System.Numerics;
+
+public static PointCloud InvertZResidualAboutPlane(
+    PointCloud cloud,
+    ScanPointXYZ planePoint,
+    Vector3 planeNormal)
 {
-    return
-        t.r00 * (t.r11 * t.r22 - t.r12 * t.r21) -
-        t.r01 * (t.r10 * t.r22 - t.r12 * t.r20) +
-        t.r02 * (t.r10 * t.r21 - t.r11 * t.r20);
+    if (cloud == null)
+        throw new ArgumentNullException(nameof(cloud));
+
+    if (cloud.Points == null)
+        throw new ArgumentException("Point cloud has no points.", nameof(cloud));
+
+    Vector3 n = Vector3.Normalize(planeNormal);
+
+    if (Math.Abs(n.Z) < 1e-9)
+        throw new ArgumentException("Plane normal Z is too close to zero. Cannot solve plane Z at XY.");
+
+    var result = new PointCloud();
+
+    foreach (var p in cloud.Points)
+    {
+        double zPlane = GetPlaneZAtXY(
+            p.X,
+            p.Y,
+            planePoint,
+            n);
+
+        double newZ = 2.0 * zPlane - p.Z;
+
+        result.Points.Add(new ScanPointXYZ(
+            p.X,
+            p.Y,
+            newZ));
+    }
+
+    return result;
+}
+
+private static double GetPlaneZAtXY(
+    double x,
+    double y,
+    ScanPointXYZ planePoint,
+    Vector3 n)
+{
+    // Plane:
+    // n.X * (x - x0) + n.Y * (y - y0) + n.Z * (z - z0) = 0
+    //
+    // Solve for z:
+    // z = z0 - (nx*(x-x0) + ny*(y-y0)) / nz
+
+    return planePoint.Z -
+           ((double)n.X * (x - planePoint.X) +
+            (double)n.Y * (y - planePoint.Y)) / n.Z;
 }
