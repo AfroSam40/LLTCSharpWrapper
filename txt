@@ -1,26 +1,71 @@
-public static Transform AddZInversionInDstFrame(
-    Transform originalTransform,
-    double zRef)
-{
-    Transform zMirror = MirrorZAboutWorldZ(zRef);
+1st pass pair transform, translation-only:
+(
+    1, 0, 0,
+    0, 1, 0,
+    0, 0, 1,
+    -383.930892047,
+    5.640624992,
+    -0.798904437,
+    1
+)
 
-    // Mirror after original transform.
-    // This means inversion happens in dst/global frame.
-    return Compose(zMirror, originalTransform);
-}
+2nd pass pair transform, translation-only:
+(
+    1, 0, 0,
+    0, 1, 0,
+    0, 0, 1,
+    -767.115387028,
+    3.210876466,
+    -1.892517078,
+    1
+)
 
-public static Transform MirrorZAboutWorldZ(double zRef)
-{
-    // Reflect across horizontal world plane Z = zRef
-    //
-    // x' = x
-    // y' = y
-    // z' = 2*zRef - z
 
-    return new Transform(
-         1, 0,  0,
-         0, 1,  0,
-         0, 0, -1,
-         0, 0, 2.0 * zRef,
-         1);
-}
+
+
+3rd pass pair transform, translation-only:
+(
+    1, 0, 0,
+    0, 1, 0,
+    0, 0, 1,
+    -1150.384704496,
+    8.668762209,
+    -4.544662462,
+    1
+)
+
+
+
+
+1st pass pair, Ry removed:
+
+(
+  0.9999998269420051, -0.0005883162072269979,  1.6573030126241025E-08,
+  0.0005883162074604313,  0.9999998265452229, -2.8170271442437395E-05,
+  0,                     2.817027631752893E-05, 0.9999999996032177,
+ -383.70682564520723,    5.49168460618165,     -0.8095378037525904,
+  1
+)
+
+
+2nd pass pair, Ry removed:
+
+(
+  0.9999998443643084, -0.0005579169821070545,  2.1189173785122254E-09,
+  0.0005579169821110782,  0.9999998443570964, -3.797907424712856E-06,
+  0,                     3.7979080158028967E-06, 0.999999999992788,
+ -766.9037812048748,     3.055264904584419,   -1.893957246534228,
+  1
+)
+
+
+
+3rd pass pair, Ry removed:
+
+(
+  0.9999997485910996, -0.0007090964224189388,  3.466828149998816E-08,
+  0.0007090964232664186,  0.9999997473959454, -4.889077373197836E-05,
+  0,                     4.889078602355711E-05, 0.9999999988048455,
+ -1150.1209533885508,    8.473745528236009,   -4.562842806319878,
+  1
+)
