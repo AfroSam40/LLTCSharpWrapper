@@ -264,3 +264,14 @@ public static class TransformEdit
         return new ScanPointXYZ(c.X, c.Y, c.Z);
     }
 }
+
+public static ScanPointXYZ ApplyTransform(Transform t, ScanPointXYZ p)
+{
+    var r = t.transformRaw;
+
+    double x = r.s * (r.r00 * p.X + r.r01 * p.Y + r.r02 * p.Z) + r.tx;
+    double y = r.s * (r.r10 * p.X + r.r11 * p.Y + r.r12 * p.Z) + r.ty;
+    double z = r.s * (r.r20 * p.X + r.r21 * p.Y + r.r22 * p.Z) + r.tz;
+
+    return new ScanPointXYZ(x, y, z);
+}
