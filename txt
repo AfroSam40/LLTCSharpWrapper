@@ -2,277 +2,180 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 
-public static class TransformRotationEdit
+public enum Axis
 {
-    public enum Axis
-    {
-        X,
-        Y,
-        Z
-    }
+    X,
+    Y,
+    Z
+}
 
-    public enum RotationMatrixElement
-    {
-        R00, R01, R02,
-        R10, R11, R12,
-        R20, R21, R22
-    }
+public static class TransformEdit
+{
+    // Use this tuple format everywhere:
+    // (r00,r01,r02, r10,r11,r12, r20,r21,r22, tx,ty,tz, s)
 
-    // ============================================================
-    // MAIN METHOD 1:
-    // Change one Euler angle, then compensate tx/ty/tz so the
-    // moving corner centroid still lands in the same stitched place.
-    //
-    // Euler convention:
-    // R = Rz * Ry * Rx
-    // ZYX Tait-Bryan / yaw-pitch-roll
-    // ============================================================
-    public static Transform WithEulerRotationChangedPreserveCentroid(
-        Transform originalTransform,
+    public static Transform SetRotationWithCompensation(
+        Transform t,
         Axis axis,
         double newAngleDeg,
         IReadOnlyList<Vector3> movingCorners)
     {
-        ScanPointXYZ anchor = GetCentroidPoint(movingCorners);
+        var a = GetEulerAnglesDeg(t);
 
-        return WithEulerRotationChangedPreserveAnchor(
-            originalTransform,
-            axis,
-            newAngleDeg,
-            anchor);
+        double rx = a.rxDeg;
+        double ry = a.ryDeg;
+        double rz = a.rzDeg;
+
+        if (axis == Axis.X) rx = newAngleDeg;
+        if (axis == Axis.Y) ry = newAngleDeg;
+        if (axis == Axis.Z) rz = newAngleDeg;
+
+        var newRotRaw = EulerToRawTuple(
+            rx,
+            ry,
+            rz,
+            t.transformRaw.s);
+
+        return CompensateTranslation(
+            oldTransform: t,
+            newRawNoTranslation: newRotRaw,
+            anchor: GetCentroidPoint(movingCorners));
     }
 
-    public static Transform WithEulerRotationChangedPreserveAnchor(
-        Transform originalTransform,
-        Axis axis,
-        double newAngleDeg,
-        ScanPointXYZ anchor)
-    {
-        var angles = GetEulerAnglesDeg(originalTransform);
-
-        double rxDeg = angles.rxDeg;
-        double ryDeg = angles.ryDeg;
-        double rzDeg = angles.rzDeg;
-
-        switch (axis)
-        {
-            case Axis.X:
-                rxDeg = newAngleDeg;
-                break;
-
-            case Axis.Y:
-                ryDeg = newAngleDeg;
-                break;
-
-            case Axis.Z:
-                rzDeg = newAngleDeg;
-                break;
-
-            default:
-                throw new ArgumentOutOfRangeException(nameof(axis), axis, null);
-        }
-
-        Transform newRotationOnly = FromEulerDegNoTranslation(
-            rxDeg,
-            ryDeg,
-            rzDeg,
-            originalTransform.s);
-
-        return RecomputeTranslationToPreserveAnchor(
-            oldTransform: originalTransform,
-            newRotationOnly: newRotationOnly,
-            anchor: anchor);
-    }
-
-    // ============================================================
-    // MAIN METHOD 2:
-    // Change one raw rotation matrix element, then compensate tx/ty/tz.
-    //
-    // Warning:
-    // Directly changing one matrix element can make the matrix non-rigid.
-    // If reOrthonormalize = true, the final matrix is made rigid again,
-    // but the edited element may move slightly during normalization.
-    //
-    // For Ry / pitch testing, prefer:
-    // WithEulerRotationChangedPreserveCentroid(... Axis.Y ...)
-    // ============================================================
-    public static Transform WithRotationElementChangedPreserveCentroid(
-        Transform originalTransform,
-        RotationMatrixElement element,
-        double newValue,
-        IReadOnlyList<Vector3> movingCorners,
-        bool reOrthonormalize = true)
-    {
-        ScanPointXYZ anchor = GetCentroidPoint(movingCorners);
-
-        return WithRotationElementChangedPreserveAnchor(
-            originalTransform,
-            element,
-            newValue,
-            anchor,
-            reOrthonormalize);
-    }
-
-    public static Transform WithRotationElementChangedPreserveAnchor(
-        Transform originalTransform,
-        RotationMatrixElement element,
-        double newValue,
-        ScanPointXYZ anchor,
-        bool reOrthonormalize = true)
-    {
-        double nr00 = originalTransform.r00;
-        double nr01 = originalTransform.r01;
-        double nr02 = originalTransform.r02;
-
-        double nr10 = originalTransform.r10;
-        double nr11 = originalTransform.r11;
-        double nr12 = originalTransform.r12;
-
-        double nr20 = originalTransform.r20;
-        double nr21 = originalTransform.r21;
-        double nr22 = originalTransform.r22;
-
-        switch (element)
-        {
-            case RotationMatrixElement.R00: nr00 = newValue; break;
-            case RotationMatrixElement.R01: nr01 = newValue; break;
-            case RotationMatrixElement.R02: nr02 = newValue; break;
-
-            case RotationMatrixElement.R10: nr10 = newValue; break;
-            case RotationMatrixElement.R11: nr11 = newValue; break;
-            case RotationMatrixElement.R12: nr12 = newValue; break;
-
-            case RotationMatrixElement.R20: nr20 = newValue; break;
-            case RotationMatrixElement.R21: nr21 = newValue; break;
-            case RotationMatrixElement.R22: nr22 = newValue; break;
-
-            default:
-                throw new ArgumentOutOfRangeException(nameof(element), element, null);
-        }
-
-        Transform newRotationOnly = new Transform(
-            nr00, nr01, nr02,
-            nr10, nr11, nr12,
-            nr20, nr21, nr22,
-            0, 0, 0,
-            originalTransform.s);
-
-        if (reOrthonormalize)
-            newRotationOnly = OrthonormalizeRotation(newRotationOnly);
-
-        return RecomputeTranslationToPreserveAnchor(
-            oldTransform: originalTransform,
-            newRotationOnly: newRotationOnly,
-            anchor: anchor);
-    }
-
-    // ============================================================
-    // MAIN METHOD 3:
-    // Translation-only version.
-    // Removes all rotation but preserves where the moving centroid lands.
-    // Useful for proving whether pass rotations are causing bow.
-    // ============================================================
-    public static Transform MakeCentroidPreservingTranslationOnlyTransform(
-        Transform originalTransform,
+    public static Transform SetRotationMatrixWithCompensation(
+        Transform t,
+        (
+            double r00, double r01, double r02,
+            double r10, double r11, double r12,
+            double r20, double r21, double r22
+        ) newR,
         IReadOnlyList<Vector3> movingCorners)
     {
-        ScanPointXYZ anchor = GetCentroidPoint(movingCorners);
+        var old = t.transformRaw;
 
-        Transform identityRotation = new Transform(
-            1, 0, 0,
-            0, 1, 0,
-            0, 0, 1,
-            0, 0, 0,
-            originalTransform.s);
+        var newRawNoTranslation =
+        (
+            newR.r00, newR.r01, newR.r02,
+            newR.r10, newR.r11, newR.r12,
+            newR.r20, newR.r21, newR.r22,
+            0.0, 0.0, 0.0,
+            old.s
+        );
 
-        return RecomputeTranslationToPreserveAnchor(
-            oldTransform: originalTransform,
-            newRotationOnly: identityRotation,
-            anchor: anchor);
+        return CompensateTranslation(
+            oldTransform: t,
+            newRawNoTranslation: newRawNoTranslation,
+            anchor: GetCentroidPoint(movingCorners));
     }
 
-    // ============================================================
-    // Core compensation:
-    //
-    // oldAnchorOut = oldTransform(anchor)
-    //
-    // newTranslation = oldAnchorOut - newRotation * anchor
-    //
-    // This keeps the stitch centroid fixed while changing rotation.
-    // ============================================================
-    private static Transform RecomputeTranslationToPreserveAnchor(
+    public static Transform SetRotationElementWithCompensation(
+        Transform t,
+        (int row, int col) element,
+        double newValue,
+        IReadOnlyList<Vector3> movingCorners)
+    {
+        var r = t.transformRaw;
+
+        double r00 = r.r00, r01 = r.r01, r02 = r.r02;
+        double r10 = r.r10, r11 = r.r11, r12 = r.r12;
+        double r20 = r.r20, r21 = r.r21, r22 = r.r22;
+
+        if      (element == (0, 0)) r00 = newValue;
+        else if (element == (0, 1)) r01 = newValue;
+        else if (element == (0, 2)) r02 = newValue;
+        else if (element == (1, 0)) r10 = newValue;
+        else if (element == (1, 1)) r11 = newValue;
+        else if (element == (1, 2)) r12 = newValue;
+        else if (element == (2, 0)) r20 = newValue;
+        else if (element == (2, 1)) r21 = newValue;
+        else if (element == (2, 2)) r22 = newValue;
+        else
+            throw new ArgumentOutOfRangeException(nameof(element), "Rotation element must be row/col 0, 1, or 2.");
+
+        var newRawNoTranslation =
+        (
+            r00, r01, r02,
+            r10, r11, r12,
+            r20, r21, r22,
+            0.0, 0.0, 0.0,
+            r.s
+        );
+
+        return CompensateTranslation(
+            oldTransform: t,
+            newRawNoTranslation: newRawNoTranslation,
+            anchor: GetCentroidPoint(movingCorners));
+    }
+
+    private static Transform CompensateTranslation(
         Transform oldTransform,
-        Transform newRotationOnly,
+        (
+            double r00, double r01, double r02,
+            double r10, double r11, double r12,
+            double r20, double r21, double r22,
+            double tx, double ty, double tz,
+            double s
+        ) newRawNoTranslation,
         ScanPointXYZ anchor)
     {
-        ScanPointXYZ oldAnchorOut = ApplyTransform(oldTransform, anchor);
+        ScanPointXYZ oldOut = oldTransform.TransformPt(anchor);
 
         double x = anchor.X;
         double y = anchor.Y;
         double z = anchor.Z;
 
-        double s = newRotationOnly.s;
+        double rotX = newRawNoTranslation.s *
+            (newRawNoTranslation.r00 * x +
+             newRawNoTranslation.r01 * y +
+             newRawNoTranslation.r02 * z);
 
-        double rotatedX = s * (
-            newRotationOnly.r00 * x +
-            newRotationOnly.r01 * y +
-            newRotationOnly.r02 * z);
+        double rotY = newRawNoTranslation.s *
+            (newRawNoTranslation.r10 * x +
+             newRawNoTranslation.r11 * y +
+             newRawNoTranslation.r12 * z);
 
-        double rotatedY = s * (
-            newRotationOnly.r10 * x +
-            newRotationOnly.r11 * y +
-            newRotationOnly.r12 * z);
+        double rotZ = newRawNoTranslation.s *
+            (newRawNoTranslation.r20 * x +
+             newRawNoTranslation.r21 * y +
+             newRawNoTranslation.r22 * z);
 
-        double rotatedZ = s * (
-            newRotationOnly.r20 * x +
-            newRotationOnly.r21 * y +
-            newRotationOnly.r22 * z);
-
-        double newTx = oldAnchorOut.X - rotatedX;
-        double newTy = oldAnchorOut.Y - rotatedY;
-        double newTz = oldAnchorOut.Z - rotatedZ;
+        double tx = oldOut.X - rotX;
+        double ty = oldOut.Y - rotY;
+        double tz = oldOut.Z - rotZ;
 
         return new Transform(
-            newRotationOnly.r00, newRotationOnly.r01, newRotationOnly.r02,
-            newRotationOnly.r10, newRotationOnly.r11, newRotationOnly.r12,
-            newRotationOnly.r20, newRotationOnly.r21, newRotationOnly.r22,
-            newTx, newTy, newTz,
-            s);
+        (
+            newRawNoTranslation.r00,
+            newRawNoTranslation.r01,
+            newRawNoTranslation.r02,
+
+            newRawNoTranslation.r10,
+            newRawNoTranslation.r11,
+            newRawNoTranslation.r12,
+
+            newRawNoTranslation.r20,
+            newRawNoTranslation.r21,
+            newRawNoTranslation.r22,
+
+            tx,
+            ty,
+            tz,
+
+            newRawNoTranslation.s
+        ));
     }
 
-    // ============================================================
-    // Apply transform using your matrix convention:
-    //
-    // x' = s * (r00*x + r01*y + r02*z) + tx
-    // y' = s * (r10*x + r11*y + r12*z) + ty
-    // z' = s * (r20*x + r21*y + r22*z) + tz
-    // ============================================================
-    public static ScanPointXYZ ApplyTransform(
-        Transform t,
-        ScanPointXYZ p)
-    {
-        double x = t.s * (t.r00 * p.X + t.r01 * p.Y + t.r02 * p.Z) + t.tx;
-        double y = t.s * (t.r10 * p.X + t.r11 * p.Y + t.r12 * p.Z) + t.ty;
-        double z = t.s * (t.r20 * p.X + t.r21 * p.Y + t.r22 * p.Z) + t.tz;
-
-        return new ScanPointXYZ(x, y, z);
-    }
-
-    // ============================================================
-    // Build rotation from Euler angles.
-    //
-    // Convention:
-    // R = Rz * Ry * Rx
-    //
-    // rx = rotation about X
-    // ry = rotation about Y
-    // rz = rotation about Z
-    // ============================================================
-    public static Transform FromEulerDegNoTranslation(
+    private static (
+        double r00, double r01, double r02,
+        double r10, double r11, double r12,
+        double r20, double r21, double r22,
+        double tx, double ty, double tz,
+        double s
+    ) EulerToRawTuple(
         double rxDeg,
         double ryDeg,
         double rzDeg,
-        double scale = 1.0)
+        double scale)
     {
         double rx = rxDeg * Math.PI / 180.0;
         double ry = ryDeg * Math.PI / 180.0;
@@ -287,6 +190,7 @@ public static class TransformRotationEdit
         double cz = Math.Cos(rz);
         double sz = Math.Sin(rz);
 
+        // Convention:
         // R = Rz * Ry * Rx
 
         double r00 = cy * cz;
@@ -301,129 +205,54 @@ public static class TransformRotationEdit
         double r21 = cy * sx;
         double r22 = cx * cy;
 
-        return new Transform(
+        return
+        (
             r00, r01, r02,
             r10, r11, r12,
             r20, r21, r22,
-            0, 0, 0,
-            scale);
+            0.0, 0.0, 0.0,
+            scale
+        );
     }
 
-    // ============================================================
-    // Extract Euler angles from transform.
-    //
-    // Convention:
-    // R = Rz * Ry * Rx
-    //
-    // r20 = -sin(ry)
-    // ry = asin(-r20)
-    // ============================================================
     public static (double rxDeg, double ryDeg, double rzDeg) GetEulerAnglesDeg(
         Transform t)
     {
-        double Clamp(double v, double min, double max)
-        {
-            if (v < min) return min;
-            if (v > max) return max;
-            return v;
-        }
+        var r = t.transformRaw;
 
-        double ryRad = Math.Asin(Clamp(-t.r20, -1.0, 1.0));
-        double cosRy = Math.Cos(ryRad);
+        double r20 = Math.Max(-1.0, Math.Min(1.0, r.r20));
 
-        double rxRad;
-        double rzRad;
+        double ry = Math.Asin(-r20);
+        double cosRy = Math.Cos(ry);
+
+        double rx;
+        double rz;
 
         if (Math.Abs(cosRy) > 1e-9)
         {
-            rxRad = Math.Atan2(t.r21, t.r22);
-            rzRad = Math.Atan2(t.r10, t.r00);
+            rx = Math.Atan2(r.r21, r.r22);
+            rz = Math.Atan2(r.r10, r.r00);
         }
         else
         {
-            // Gimbal lock fallback
-            rxRad = 0.0;
-            rzRad = Math.Atan2(-t.r01, t.r11);
+            rx = 0.0;
+            rz = Math.Atan2(-r.r01, r.r11);
         }
 
         const double radToDeg = 180.0 / Math.PI;
 
-        return (
-            rxRad * radToDeg,
-            ryRad * radToDeg,
-            rzRad * radToDeg);
+        return
+        (
+            rx * radToDeg,
+            ry * radToDeg,
+            rz * radToDeg
+        );
     }
 
-    // ============================================================
-    // Orthonormalize rotation using the matrix columns as axes:
-    //
-    // source X axis in destination frame = <r00, r10, r20>
-    // source Y axis in destination frame = <r01, r11, r21>
-    // source Z axis in destination frame = <r02, r12, r22>
-    // ============================================================
-    public static Transform OrthonormalizeRotation(
-        Transform t)
-    {
-        Vector3 xAxis = new Vector3(
-            (float)t.r00,
-            (float)t.r10,
-            (float)t.r20);
-
-        Vector3 yAxis = new Vector3(
-            (float)t.r01,
-            (float)t.r11,
-            (float)t.r21);
-
-        if (xAxis.LengthSquared() < 1e-12f)
-            throw new InvalidOperationException("Invalid X axis during orthonormalization.");
-
-        xAxis = Vector3.Normalize(xAxis);
-
-        // Remove X component from Y
-        yAxis = yAxis - Vector3.Dot(yAxis, xAxis) * xAxis;
-
-        if (yAxis.LengthSquared() < 1e-12f)
-            throw new InvalidOperationException("Invalid Y axis during orthonormalization.");
-
-        yAxis = Vector3.Normalize(yAxis);
-
-        // Right-handed Z axis
-        Vector3 zAxis = Vector3.Cross(xAxis, yAxis);
-
-        if (zAxis.LengthSquared() < 1e-12f)
-            throw new InvalidOperationException("Invalid Z axis during orthonormalization.");
-
-        zAxis = Vector3.Normalize(zAxis);
-
-        // Recompute Y to remove any tiny numerical error
-        yAxis = Vector3.Cross(zAxis, xAxis);
-        yAxis = Vector3.Normalize(yAxis);
-
-        return new Transform(
-            xAxis.X, yAxis.X, zAxis.X,
-            xAxis.Y, yAxis.Y, zAxis.Y,
-            xAxis.Z, yAxis.Z, zAxis.Z,
-            0, 0, 0,
-            t.s);
-    }
-
-    // ============================================================
-    // Centroid helper.
-    // movingCorners must be the corner set from the cloud being moved.
-    //
-    // If transform maps:
-    //     src -> dst
-    // then movingCorners = srcCorners
-    //
-    // If transform maps:
-    //     dst -> src
-    // then movingCorners = dstCorners
-    // ============================================================
-    public static ScanPointXYZ GetCentroidPoint(
-        IReadOnlyList<Vector3> pts)
+    private static ScanPointXYZ GetCentroidPoint(IReadOnlyList<Vector3> pts)
     {
         if (pts == null || pts.Count == 0)
-            throw new ArgumentException("Point list is null or empty.", nameof(pts));
+            throw new ArgumentException("movingCorners is null or empty.", nameof(pts));
 
         Vector3 c = Vector3.Zero;
 
@@ -433,140 +262,5 @@ public static class TransformRotationEdit
         c /= pts.Count;
 
         return new ScanPointXYZ(c.X, c.Y, c.Z);
-    }
-
-    // ============================================================
-    // Debug print helpers.
-    // ============================================================
-    public static void PrintTransform(
-        string name,
-        Transform t)
-    {
-        var a = GetEulerAnglesDeg(t);
-
-        System.Diagnostics.Debug.Print("");
-        System.Diagnostics.Debug.Print($"===== {name} =====");
-        System.Diagnostics.Debug.Print(FormatTransform(t));
-        System.Diagnostics.Debug.Print($"Rx = {a.rxDeg:F9} deg");
-        System.Diagnostics.Debug.Print($"Ry = {a.ryDeg:F9} deg");
-        System.Diagnostics.Debug.Print($"Rz = {a.rzDeg:F9} deg");
-        System.Diagnostics.Debug.Print($"r20 = {t.r20:F12}");
-        System.Diagnostics.Debug.Print($"Z change per 1000 mm X = {t.r20 * 1000.0:F6} mm");
-        System.Diagnostics.Debug.Print($"Det = {RotationDeterminant(t):F12}");
-        System.Diagnostics.Debug.Print("======================");
-        System.Diagnostics.Debug.Print("");
-    }
-
-    public static string FormatTransform(
-        Transform t)
-    {
-        return
-            $"({t.r00}, {t.r01}, {t.r02}, " +
-            $"{t.r10}, {t.r11}, {t.r12}, " +
-            $"{t.r20}, {t.r21}, {t.r22}, " +
-            $"{t.tx}, {t.ty}, {t.tz}, {t.s})";
-    }
-
-    public static double RotationDeterminant(
-        Transform t)
-    {
-        return
-            t.r00 * (t.r11 * t.r22 - t.r12 * t.r21) -
-            t.r01 * (t.r10 * t.r22 - t.r12 * t.r20) +
-            t.r02 * (t.r10 * t.r21 - t.r11 * t.r20);
-    }
-
-    public static void PrintCornerFitError(
-        string name,
-        IReadOnlyList<Vector3> movingCorners,
-        IReadOnlyList<Vector3> fixedCorners,
-        Transform t)
-    {
-        if (movingCorners == null || fixedCorners == null)
-            throw new ArgumentNullException();
-
-        if (movingCorners.Count != fixedCorners.Count)
-            throw new ArgumentException("movingCorners and fixedCorners must have same count.");
-
-        double sum = 0;
-        double max = 0;
-
-        System.Diagnostics.Debug.Print("");
-        System.Diagnostics.Debug.Print($"--- {name} corner fit check ---");
-
-        for (int i = 0; i < movingCorners.Count; i++)
-        {
-            var movingPt = new ScanPointXYZ(
-                movingCorners[i].X,
-                movingCorners[i].Y,
-                movingCorners[i].Z);
-
-            var p = ApplyTransform(t, movingPt);
-
-            double dx = p.X - fixedCorners[i].X;
-            double dy = p.Y - fixedCorners[i].Y;
-            double dz = p.Z - fixedCorners[i].Z;
-
-            double err = Math.Sqrt(dx * dx + dy * dy + dz * dz);
-
-            sum += err;
-            max = Math.Max(max, err);
-
-            System.Diagnostics.Debug.Print(
-                $"Pair {i}: " +
-                $"dX={dx:F6}, dY={dy:F6}, dZ={dz:F6}, Err={err:F6}");
-        }
-
-        System.Diagnostics.Debug.Print($"Mean Err = {sum / movingCorners.Count:F6}");
-        System.Diagnostics.Debug.Print($"Max Err  = {max:F6}");
-        System.Diagnostics.Debug.Print("");
-    }
-
-    // ============================================================
-    // Example usage:
-    // ============================================================
-    public static void ExampleUsage(
-        Transform passTransform,
-        IReadOnlyList<Vector3> movingCorners,
-        IReadOnlyList<Vector3> fixedCorners)
-    {
-        // Remove only Ry and preserve stitch centroid
-        Transform ryRemoved = WithEulerRotationChangedPreserveCentroid(
-            originalTransform: passTransform,
-            axis: Axis.Y,
-            newAngleDeg: 0.0,
-            movingCorners: movingCorners);
-
-        PrintTransform("Original", passTransform);
-        PrintTransform("Ry removed, centroid preserved", ryRemoved);
-
-        PrintCornerFitError(
-            "Original",
-            movingCorners,
-            fixedCorners,
-            passTransform);
-
-        PrintCornerFitError(
-            "Ry removed, centroid preserved",
-            movingCorners,
-            fixedCorners,
-            ryRemoved);
-
-        // Directly change r20 and preserve stitch centroid
-        Transform r20Zeroed = WithRotationElementChangedPreserveCentroid(
-            originalTransform: passTransform,
-            element: RotationMatrixElement.R20,
-            newValue: 0.0,
-            movingCorners: movingCorners,
-            reOrthonormalize: true);
-
-        PrintTransform("r20 zeroed, centroid preserved", r20Zeroed);
-
-        // Remove all rotation and preserve stitch centroid
-        Transform translationOnly = MakeCentroidPreservingTranslationOnlyTransform(
-            originalTransform: passTransform,
-            movingCorners: movingCorners);
-
-        PrintTransform("Translation only, centroid preserved", translationOnly);
     }
 }
