@@ -1,277 +1,168 @@
+
 using System;
-using System.Collections.Generic;
-using System.Numerics;
+using System.Globalization;
+using System.Windows;
+using System.Windows.Controls;
 
-public enum Axis
+public static class TransformEditorPopup
 {
-    X,
-    Y,
-    Z
-}
-
-public static class TransformEdit
-{
-    // Use this tuple format everywhere:
-    // (r00,r01,r02, r10,r11,r12, r20,r21,r22, tx,ty,tz, s)
-
-    public static Transform SetRotationWithCompensation(
-        Transform t,
-        Axis axis,
-        double newAngleDeg,
-        IReadOnlyList<Vector3> movingCorners)
+    public static Transform ShowTransformEditor(Transform input, Window owner = null)
     {
-        var a = GetEulerAnglesDeg(t);
+        var r = input.transformRaw;
 
-        double rx = a.rxDeg;
-        double ry = a.ryDeg;
-        double rz = a.rzDeg;
-
-        if (axis == Axis.X) rx = newAngleDeg;
-        if (axis == Axis.Y) ry = newAngleDeg;
-        if (axis == Axis.Z) rz = newAngleDeg;
-
-        var newRotRaw = EulerToRawTuple(
-            rx,
-            ry,
-            rz,
-            t.transformRaw.s);
-
-        return CompensateTranslation(
-            oldTransform: t,
-            newRawNoTranslation: newRotRaw,
-            anchor: GetCentroidPoint(movingCorners));
-    }
-
-    public static Transform SetRotationMatrixWithCompensation(
-        Transform t,
-        (
-            double r00, double r01, double r02,
-            double r10, double r11, double r12,
-            double r20, double r21, double r22
-        ) newR,
-        IReadOnlyList<Vector3> movingCorners)
-    {
-        var old = t.transformRaw;
-
-        var newRawNoTranslation =
-        (
-            newR.r00, newR.r01, newR.r02,
-            newR.r10, newR.r11, newR.r12,
-            newR.r20, newR.r21, newR.r22,
-            0.0, 0.0, 0.0,
-            old.s
-        );
-
-        return CompensateTranslation(
-            oldTransform: t,
-            newRawNoTranslation: newRawNoTranslation,
-            anchor: GetCentroidPoint(movingCorners));
-    }
-
-    public static Transform SetRotationElementWithCompensation(
-        Transform t,
-        (int row, int col) element,
-        double newValue,
-        IReadOnlyList<Vector3> movingCorners)
-    {
-        var r = t.transformRaw;
-
-        double r00 = r.r00, r01 = r.r01, r02 = r.r02;
-        double r10 = r.r10, r11 = r.r11, r12 = r.r12;
-        double r20 = r.r20, r21 = r.r21, r22 = r.r22;
-
-        if      (element == (0, 0)) r00 = newValue;
-        else if (element == (0, 1)) r01 = newValue;
-        else if (element == (0, 2)) r02 = newValue;
-        else if (element == (1, 0)) r10 = newValue;
-        else if (element == (1, 1)) r11 = newValue;
-        else if (element == (1, 2)) r12 = newValue;
-        else if (element == (2, 0)) r20 = newValue;
-        else if (element == (2, 1)) r21 = newValue;
-        else if (element == (2, 2)) r22 = newValue;
-        else
-            throw new ArgumentOutOfRangeException(nameof(element), "Rotation element must be row/col 0, 1, or 2.");
-
-        var newRawNoTranslation =
-        (
-            r00, r01, r02,
-            r10, r11, r12,
-            r20, r21, r22,
-            0.0, 0.0, 0.0,
-            r.s
-        );
-
-        return CompensateTranslation(
-            oldTransform: t,
-            newRawNoTranslation: newRawNoTranslation,
-            anchor: GetCentroidPoint(movingCorners));
-    }
-
-    private static Transform CompensateTranslation(
-        Transform oldTransform,
-        (
-            double r00, double r01, double r02,
-            double r10, double r11, double r12,
-            double r20, double r21, double r22,
-            double tx, double ty, double tz,
-            double s
-        ) newRawNoTranslation,
-        ScanPointXYZ anchor)
-    {
-        ScanPointXYZ oldOut = oldTransform.TransformPt(anchor);
-
-        double x = anchor.X;
-        double y = anchor.Y;
-        double z = anchor.Z;
-
-        double rotX = newRawNoTranslation.s *
-            (newRawNoTranslation.r00 * x +
-             newRawNoTranslation.r01 * y +
-             newRawNoTranslation.r02 * z);
-
-        double rotY = newRawNoTranslation.s *
-            (newRawNoTranslation.r10 * x +
-             newRawNoTranslation.r11 * y +
-             newRawNoTranslation.r12 * z);
-
-        double rotZ = newRawNoTranslation.s *
-            (newRawNoTranslation.r20 * x +
-             newRawNoTranslation.r21 * y +
-             newRawNoTranslation.r22 * z);
-
-        double tx = oldOut.X - rotX;
-        double ty = oldOut.Y - rotY;
-        double tz = oldOut.Z - rotZ;
-
-        return new Transform(
-        (
-            newRawNoTranslation.r00,
-            newRawNoTranslation.r01,
-            newRawNoTranslation.r02,
-
-            newRawNoTranslation.r10,
-            newRawNoTranslation.r11,
-            newRawNoTranslation.r12,
-
-            newRawNoTranslation.r20,
-            newRawNoTranslation.r21,
-            newRawNoTranslation.r22,
-
-            tx,
-            ty,
-            tz,
-
-            newRawNoTranslation.s
-        ));
-    }
-
-    private static (
-        double r00, double r01, double r02,
-        double r10, double r11, double r12,
-        double r20, double r21, double r22,
-        double tx, double ty, double tz,
-        double s
-    ) EulerToRawTuple(
-        double rxDeg,
-        double ryDeg,
-        double rzDeg,
-        double scale)
-    {
-        double rx = rxDeg * Math.PI / 180.0;
-        double ry = ryDeg * Math.PI / 180.0;
-        double rz = rzDeg * Math.PI / 180.0;
-
-        double cx = Math.Cos(rx);
-        double sx = Math.Sin(rx);
-
-        double cy = Math.Cos(ry);
-        double sy = Math.Sin(ry);
-
-        double cz = Math.Cos(rz);
-        double sz = Math.Sin(rz);
-
-        // Convention:
-        // R = Rz * Ry * Rx
-
-        double r00 = cy * cz;
-        double r01 = cz * sx * sy - cx * sz;
-        double r02 = sx * sz + cx * cz * sy;
-
-        double r10 = cy * sz;
-        double r11 = cx * cz + sx * sy * sz;
-        double r12 = cx * sy * sz - cz * sx;
-
-        double r20 = -sy;
-        double r21 = cy * sx;
-        double r22 = cx * cy;
-
-        return
-        (
-            r00, r01, r02,
-            r10, r11, r12,
-            r20, r21, r22,
-            0.0, 0.0, 0.0,
-            scale
-        );
-    }
-
-    public static (double rxDeg, double ryDeg, double rzDeg) GetEulerAnglesDeg(
-        Transform t)
-    {
-        var r = t.transformRaw;
-
-        double r20 = Math.Max(-1.0, Math.Min(1.0, r.r20));
-
-        double ry = Math.Asin(-r20);
-        double cosRy = Math.Cos(ry);
-
-        double rx;
-        double rz;
-
-        if (Math.Abs(cosRy) > 1e-9)
+        var fields = new (string name, double value)[]
         {
-            rx = Math.Atan2(r.r21, r.r22);
-            rz = Math.Atan2(r.r10, r.r00);
-        }
-        else
+            ("r00", r.r00), ("r01", r.r01), ("r02", r.r02),
+            ("r10", r.r10), ("r11", r.r11), ("r12", r.r12),
+            ("r20", r.r20), ("r21", r.r21), ("r22", r.r22),
+            ("tx",  r.tx),  ("ty",  r.ty),  ("tz",  r.tz),
+            ("s",   r.s)
+        };
+
+        Transform result = input;
+        bool saved = false;
+
+        var window = new Window
         {
-            rx = 0.0;
-            rz = Math.Atan2(-r.r01, r.r11);
+            Title = "Edit Transform",
+            Width = 360,
+            Height = 560,
+            ResizeMode = ResizeMode.NoResize,
+            WindowStartupLocation = owner == null
+                ? WindowStartupLocation.CenterScreen
+                : WindowStartupLocation.CenterOwner,
+            Owner = owner
+        };
+
+        var root = new DockPanel
+        {
+            Margin = new Thickness(12)
+        };
+
+        var grid = new Grid();
+
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(70) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        var textBoxes = new TextBox[fields.Length];
+
+        for (int i = 0; i < fields.Length; i++)
+        {
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            var label = new TextBlock
+            {
+                Text = fields[i].name,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 4, 8, 4)
+            };
+
+            var box = new TextBox
+            {
+                Text = fields[i].value.ToString("G17", CultureInfo.InvariantCulture),
+                Margin = new Thickness(0, 4, 0, 4)
+            };
+
+            textBoxes[i] = box;
+
+            Grid.SetRow(label, i);
+            Grid.SetColumn(label, 0);
+
+            Grid.SetRow(box, i);
+            Grid.SetColumn(box, 1);
+
+            grid.Children.Add(label);
+            grid.Children.Add(box);
         }
 
-        const double radToDeg = 180.0 / Math.PI;
+        var scroll = new ScrollViewer
+        {
+            Content = grid,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        };
 
-        return
-        (
-            rx * radToDeg,
-            ry * radToDeg,
-            rz * radToDeg
-        );
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 12, 0, 0)
+        };
+
+        var saveButton = new Button
+        {
+            Content = "Save",
+            Width = 80,
+            Height = 30,
+            Margin = new Thickness(4, 0, 0, 0)
+        };
+
+        var cancelButton = new Button
+        {
+            Content = "Cancel",
+            Width = 80,
+            Height = 30,
+            Margin = new Thickness(4, 0, 0, 0)
+        };
+
+        saveButton.Click += (_, __) =>
+        {
+            double[] v = new double[textBoxes.Length];
+
+            for (int i = 0; i < textBoxes.Length; i++)
+            {
+                if (!double.TryParse(
+                    textBoxes[i].Text,
+                    NumberStyles.Float,
+                    CultureInfo.InvariantCulture,
+                    out v[i]))
+                {
+                    MessageBox.Show(
+                        window,
+                        $"Invalid value for {fields[i].name}",
+                        "Invalid Transform Value",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
+
+                    textBoxes[i].Focus();
+                    textBoxes[i].SelectAll();
+                    return;
+                }
+            }
+
+            result = new Transform
+            (
+                (
+                    v[0],  v[1],  v[2],
+                    v[3],  v[4],  v[5],
+                    v[6],  v[7],  v[8],
+                    v[9],  v[10], v[11],
+                    v[12]
+                )
+            );
+
+            saved = true;
+            window.DialogResult = true;
+            window.Close();
+        };
+
+        cancelButton.Click += (_, __) =>
+        {
+            saved = false;
+            window.DialogResult = false;
+            window.Close();
+        };
+
+        buttons.Children.Add(cancelButton);
+        buttons.Children.Add(saveButton);
+
+        DockPanel.SetDock(buttons, Dock.Bottom);
+
+        root.Children.Add(buttons);
+        root.Children.Add(scroll);
+
+        window.Content = root;
+        window.ShowDialog();
+
+        return saved ? result : input;
     }
-
-    private static ScanPointXYZ GetCentroidPoint(IReadOnlyList<Vector3> pts)
-    {
-        if (pts == null || pts.Count == 0)
-            throw new ArgumentException("movingCorners is null or empty.", nameof(pts));
-
-        Vector3 c = Vector3.Zero;
-
-        foreach (var p in pts)
-            c += p;
-
-        c /= pts.Count;
-
-        return new ScanPointXYZ(c.X, c.Y, c.Z);
-    }
-}
-
-public static ScanPointXYZ ApplyTransform(Transform t, ScanPointXYZ p)
-{
-    var r = t.transformRaw;
-
-    double x = r.s * (r.r00 * p.X + r.r01 * p.Y + r.r02 * p.Z) + r.tx;
-    double y = r.s * (r.r10 * p.X + r.r11 * p.Y + r.r12 * p.Z) + r.ty;
-    double z = r.s * (r.r20 * p.X + r.r21 * p.Y + r.r22 * p.Z) + r.tz;
-
-    return new ScanPointXYZ(x, y, z);
 }
