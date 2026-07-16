@@ -1,32 +1,18 @@
-
-using System;
-using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 
-public static class TransformEditorPopup
+public static class WObjPopup
 {
-    public static Transform ShowTransformEditor(Transform input, Window owner = null)
+    public static string ShowWObjPopup(Window owner = null, string initialValue = "")
     {
-        var r = input.transformRaw;
-
-        var fields = new (string name, double value)[]
-        {
-            ("r00", r.r00), ("r01", r.r01), ("r02", r.r02),
-            ("r10", r.r10), ("r11", r.r11), ("r12", r.r12),
-            ("r20", r.r20), ("r21", r.r21), ("r22", r.r22),
-            ("tx",  r.tx),  ("ty",  r.ty),  ("tz",  r.tz),
-            ("s",   r.s)
-        };
-
-        Transform result = input;
-        bool saved = false;
+        string result = null;
 
         var window = new Window
         {
-            Title = "Edit Transform",
-            Width = 360,
-            Height = 560,
+            Title = "Enter WObj",
+            Width = 300,
+            Height = 160,
             ResizeMode = ResizeMode.NoResize,
             WindowStartupLocation = owner == null
                 ? WindowStartupLocation.CenterScreen
@@ -34,66 +20,28 @@ public static class TransformEditorPopup
             Owner = owner
         };
 
-        var root = new DockPanel
+        var root = new StackPanel
         {
             Margin = new Thickness(12)
         };
 
-        var grid = new Grid();
-
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(70) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-        var textBoxes = new TextBox[fields.Length];
-
-        for (int i = 0; i < fields.Length; i++)
+        var label = new TextBlock
         {
-            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            Text = "WObj:",
+            Margin = new Thickness(0, 0, 0, 6)
+        };
 
-            var label = new TextBlock
-            {
-                Text = fields[i].name,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 4, 8, 4)
-            };
-
-            var box = new TextBox
-            {
-                Text = fields[i].value.ToString("G17", CultureInfo.InvariantCulture),
-                Margin = new Thickness(0, 4, 0, 4)
-            };
-
-            textBoxes[i] = box;
-
-            Grid.SetRow(label, i);
-            Grid.SetColumn(label, 0);
-
-            Grid.SetRow(box, i);
-            Grid.SetColumn(box, 1);
-
-            grid.Children.Add(label);
-            grid.Children.Add(box);
-        }
-
-        var scroll = new ScrollViewer
+        var textBox = new TextBox
         {
-            Content = grid,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+            Text = initialValue ?? "",
+            Height = 28,
+            Margin = new Thickness(0, 0, 0, 12)
         };
 
         var buttons = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            Margin = new Thickness(0, 12, 0, 0)
-        };
-
-        var saveButton = new Button
-        {
-            Content = "Save",
-            Width = 80,
-            Height = 30,
-            Margin = new Thickness(4, 0, 0, 0)
+            HorizontalAlignment = HorizontalAlignment.Right
         };
 
         var cancelButton = new Button
@@ -104,65 +52,70 @@ public static class TransformEditorPopup
             Margin = new Thickness(4, 0, 0, 0)
         };
 
+        var saveButton = new Button
+        {
+            Content = "Save",
+            Width = 80,
+            Height = 30,
+            Margin = new Thickness(4, 0, 0, 0)
+        };
+
         saveButton.Click += (_, __) =>
         {
-            double[] v = new double[textBoxes.Length];
+            string wobj = textBox.Text.Trim();
 
-            for (int i = 0; i < textBoxes.Length; i++)
+            if (string.IsNullOrWhiteSpace(wobj))
             {
-                if (!double.TryParse(
-                    textBoxes[i].Text,
-                    NumberStyles.Float,
-                    CultureInfo.InvariantCulture,
-                    out v[i]))
-                {
-                    MessageBox.Show(
-                        window,
-                        $"Invalid value for {fields[i].name}",
-                        "Invalid Transform Value",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning);
+                MessageBox.Show(
+                    window,
+                    "Please enter a WObj value.",
+                    "Invalid WObj",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
 
-                    textBoxes[i].Focus();
-                    textBoxes[i].SelectAll();
-                    return;
-                }
+                textBox.Focus();
+                textBox.SelectAll();
+                return;
             }
 
-            result = new Transform
-            (
-                (
-                    v[0],  v[1],  v[2],
-                    v[3],  v[4],  v[5],
-                    v[6],  v[7],  v[8],
-                    v[9],  v[10], v[11],
-                    v[12]
-                )
-            );
-
-            saved = true;
+            result = wobj;
             window.DialogResult = true;
             window.Close();
         };
 
         cancelButton.Click += (_, __) =>
         {
-            saved = false;
+            result = null;
             window.DialogResult = false;
             window.Close();
+        };
+
+        textBox.KeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Enter)
+                saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+            if (e.Key == Key.Escape)
+                cancelButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         };
 
         buttons.Children.Add(cancelButton);
         buttons.Children.Add(saveButton);
 
-        DockPanel.SetDock(buttons, Dock.Bottom);
-
+        root.Children.Add(label);
+        root.Children.Add(textBox);
         root.Children.Add(buttons);
-        root.Children.Add(scroll);
 
         window.Content = root;
+
+        window.Loaded += (_, __) =>
+        {
+            textBox.Focus();
+            textBox.SelectAll();
+        };
+
         window.ShowDialog();
 
-        return saved ? result : input;
+        return result;
     }
 }
